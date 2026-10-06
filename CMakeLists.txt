@@ -2,11 +2,11 @@ cmake_minimum_required(VERSION 4.3.5)
 
 project(Tizon)
 
-find_package(fmt CONFIG REQUIRED)
+#find_package(fmt CONFIG REQUIRED)
 
 add_executable(Tizon src/main/engine/Window.cpp)
 
-target_link_libraries(Tizon PRIVATE fmt::fmt)
+#target_link_libraries(Tizon PRIVATE fmt::fmt)
 
 # list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/CMake")
 
@@ -18,7 +18,7 @@ target_link_libraries(Tizon PRIVATE fmt::fmt)
 #   set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 # endif()
 
-find_package (glfw3 REQUIRED)
+find_package (glfw3 CONFIG REQUIRED)
 #find_package (glm REQUIRED)
 find_package (Vulkan 1.4.335 REQUIRED)      # Require Vulkan SDK version 1.4.335 or higher
 target_link_libraries(Tizon PRIVATE glfw Vulkan::Vulkan)

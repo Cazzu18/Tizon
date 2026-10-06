@@ -5,7 +5,6 @@
 #include <iostream>
 #include <stdexcept>
 #include <cstdlib>
-#include <fmt/core.h>
 
 
 /* In short, to draw the first triangle using VULKAN, we need to:
@@ -75,92 +74,92 @@ class Window{
             window = glfwCreateWindow(WIDTH, HEIGHT, "Tizon Renderer", nullptr, nullptr);
         }
 
-        void initVulkan(){
-            createInstance();
-            setupDebugMessenger();
-            createSurface();
-            pickPhysicalDevice();
-            createLogicalDevice();
+        // void initVulkan(){
+        //     createInstance();
+        //     setupDebugMessenger();
+        //     createSurface();
+        //     pickPhysicalDevice();
+        //     createLogicalDevice();
 
-        }
+        // }
 
-        void createSurface(){
-            VkSurfaceKHR _surface; //temporary Vulkan C API handle. GLFW’s surface function writes the new handle into it.
+        // void createSurface(){
+        //     VkSurfaceKHR _surface; //temporary Vulkan C API handle. GLFW’s surface function writes the new handle into it.
 
-            //glfwCreateWindowSurface(VkInstance, GLFW window pointer, custom allocators and pointer to a VkSurfaceKHR variable)
-            //connects Vulkan instance to the GLFW window. *instance supplies the underlying Vulkan handle
-            if(glfwCreateWindowSurface(*instance, window, nullptr, &_surface) != 0){
-                throw std::runtime_error("Failed to create window surface!");
-            }
-            surface = vk:raii::SurfaceKHR(instance, _surface); // wraps the raw handle in class member. That wrapper manages the Vulkan surface’s destruction. The next function uses surface to test whether a queue can present to this window.
-        }
+        //     //glfwCreateWindowSurface(VkInstance, GLFW window pointer, custom allocators and pointer to a VkSurfaceKHR variable)
+        //     //connects Vulkan instance to the GLFW window. *instance supplies the underlying Vulkan handle
+        //     if(glfwCreateWindowSurface(*instance, window, nullptr, &_surface) != 0){
+        //         throw std::runtime_error("Failed to create window surface!");
+        //     }
+        //     surface = vk::raii::SurfaceKHR(instance, _surface); // wraps the raw handle in class member. That wrapper manages the Vulkan surface’s destruction. The next function uses surface to test whether a queue can present to this window.
+        // }
 
-        void createLogicalDevice(){
+        // void createLogicalDevice(){
 
-            /* Choosing a queue family. */
+        //     /* Choosing a queue family. */
 
-            //A GPU exposes groups of queues called queue families. The loop finds the first family that supports graphics commands and presentation to surface
+        //     //A GPU exposes groups of queues called queue families. The loop finds the first family that supports graphics commands and presentation to surface
             
-            //find the index of the first queue family that supports graphics
-            std::vector<vk::QueueFamilyProperties> queueFamilyProperties = physicalDevice.getQueueFamilyProperties();
+        //     //find the index of the first queue family that supports graphics
+        //     std::vector<vk::QueueFamilyProperties> queueFamilyProperties = physicalDevice.getQueueFamilyProperties();
 
-            //get the first index into queueFamiltyProperties which supports both graphics and present
-            uint32_t queueIndex = ~0; //initializes the variable to 4294967295 (or 0xFFFFFFFF in hexadecimal). ~ is the Bitwise NOT that flips each of the 32 bits of that integer
-            for(uint32_t qfpIndex = 0; qfpIndex < queueFamilyProperties.size(); qfpIndex++){
-                if((queueFamilyProperties[qfpIndex].queueFlags & vk::QueueFlagBits::eGraphics) && physicalDevice.getSurfaceSupportKHR(qfpIndex, *surface)){
-                    //found a queue family that supports both graphics and present
-                    queueIndex = qfpIndex;
-                    break;
-                }
-            }
+        //     //get the first index into queueFamiltyProperties which supports both graphics and present
+        //     uint32_t queueIndex = ~0; //initializes the variable to 4294967295 (or 0xFFFFFFFF in hexadecimal). ~ is the Bitwise NOT that flips each of the 32 bits of that integer
+        //     for(uint32_t qfpIndex = 0; qfpIndex < queueFamilyProperties.size(); qfpIndex++){
+        //         if((queueFamilyProperties[qfpIndex].queueFlags & vk::QueueFlagBits::eGraphics) && physicalDevice.getSurfaceSupportKHR(qfpIndex, *surface)){
+        //             //found a queue family that supports both graphics and present
+        //             queueIndex = qfpIndex;
+        //             break;
+        //         }
+        //     }
 
-            /* End Choosing a queue family. */
+        //     /* End Choosing a queue family. */
 
-            if(queueIndex == ~0){
-                throw std::runtime_error("Could not find a queue for graphics and present -> terminating");
-            }
+        //     if(queueIndex == ~0){
+        //         throw std::runtime_error("Could not find a queue for graphics and present -> terminating");
+        //     }
 
 
-            /* Start Requesting features. */
+        //     /* Start Requesting features. */
             
-            //requests for Vulkan 1.3 features
-            //links several feature structures through their pNext pointers.
-            //C++ tempolate type. The names inside <...> are types that tell vk::StructureChain which Vulkan structures to hold and in what order
-            //vk::StructureChain<...> holds one object of each listed type and connects their pNext pointers automatically.
-            vk::StructureChain<vk::PhysicalDeviceFeatures2,
-		                   vk::PhysicalDeviceVulkan11Features,
-		                   vk::PhysicalDeviceVulkan13Features,
-		                   vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>
-		    featureChain = {
-		        {},                                    // vk::PhysicalDeviceFeatures2
-		        {.shaderDrawParameters = true},        // vk::PhysicalDeviceVulkan11Features
-		        {.dynamicRendering = true},            // vk::PhysicalDeviceVulkan13Features
-		        {.extendedDynamicState = true}         // vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT
-		    };
+        //     //requests for Vulkan 1.3 features
+        //     //links several feature structures through their pNext pointers.
+        //     //C++ tempolate type. The names inside <...> are types that tell vk::StructureChain which Vulkan structures to hold and in what order
+        //     //vk::StructureChain<...> holds one object of each listed type and connects their pNext pointers automatically.
+        //     vk::StructureChain<vk::PhysicalDeviceFeatures2,
+		//                    vk::PhysicalDeviceVulkan11Features,
+		//                    vk::PhysicalDeviceVulkan13Features,
+		//                    vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>
+		//     featureChain = {
+		//         {},                                    // vk::PhysicalDeviceFeatures2
+		//         {.shaderDrawParameters = true},        // vk::PhysicalDeviceVulkan11Features
+		//         {.dynamicRendering = true},            // vk::PhysicalDeviceVulkan13Features
+		//         {.extendedDynamicState = true}         // vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT
+		//     };
 
-            /* End Requesting features. */
+        //     /* End Requesting features. */
 
-            //create a Device
-            float queuePriority = 0.5f;
+        //     //create a Device
+        //     float queuePriority = 0.5f;
 
 
-            //declaring and initializing variables of type DeviceQueueCreateInfo and DeviceCreateInfo
-            //requests one queue
-            vk::DeviceQueueCreateInfo deviceQueueCreateInfo{.queueFamilyIndex = queueIndex, .queueCount = 1, .pQueuePriorities = &queuePriority};
+        //     //declaring and initializing variables of type DeviceQueueCreateInfo and DeviceCreateInfo
+        //     //requests one queue
+        //     vk::DeviceQueueCreateInfo deviceQueueCreateInfo{.queueFamilyIndex = queueIndex, .queueCount = 1, .pQueuePriorities = &queuePriority};
             
-            //describing the device
-            vk::DeviceCreateInfo      deviceCreateInfo{.pNext           = &featureChain.get<vk::PhysicalDeviceFeatures2>(),
-                                               .queueCreateInfoCount    = 1,
-                                               .pQueueCreateInfos       = &deviceQueueCreateInfo,
-                                               .enabledExtensionCount   = static_cast<uint32_t>(requiredDeviceExtension.size()),
-                                               .ppEnabledExtensionNames = requiredDeviceExtension.data()};
+        //     //describing the device
+        //     vk::DeviceCreateInfo      deviceCreateInfo{.pNext           = &featureChain.get<vk::PhysicalDeviceFeatures2>(),
+        //                                        .queueCreateInfoCount    = 1,
+        //                                        .pQueueCreateInfos       = &deviceQueueCreateInfo,
+        //                                        .enabledExtensionCount   = static_cast<uint32_t>(requiredDeviceExtension.size()),
+        //                                        .ppEnabledExtensionNames = requiredDeviceExtension.data()};
 
-            //create the logical device and retrieve its queue
-            device = vk::raii::Device(physicalDevice, deviceCreateInfo);
-            queue = vk::raii::Queue(device, queueIndex, 0);
+        //     //create the logical device and retrieve its queue
+        //     device = vk::raii::Device(physicalDevice, deviceCreateInfo);
+        //     queue = vk::raii::Queue(device, queueIndex, 0);
                                     
 
-        }
+        // }
 
         void mainLoop(){
             while(!glfwWindowShouldClose(window)){
@@ -176,7 +175,7 @@ class Window{
     public:
         void run(){
             initWindow();
-            initVulkan();
+            //initVulkan();
             mainLoop();
             cleanup();
         }
