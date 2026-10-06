@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\elong\Desktop\Projects\Tizon\build\CMakeFiles\71b131c64a68e5172e16f62da4a9c2f2\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{2F50E62A-3159-3A03-AF81-133D7A6F5B70}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>
