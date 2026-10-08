@@ -45,15 +45,33 @@ target_link_libraries(Tizon PRIVATE glfw Vulkan::Vulkan)
 #   )
 #   add_custom_target (${TARGET} DEPENDS ${SHADERS_DIR}/slang.spv)
 # endfunction()
+
+# connecting shader compilation to the CMake Build
+# shader.slang -> slang compiler -> build/shaders/slang.psv
+# CMake finds slangc, defines a rule to generate the SPIR-V file, makes Tizon executable depend
+# on that rule, and passes the generated file path into the C++ code.
+
+#looks for the slangc executable and stores its path in SLANGC_EXECUTABLE
+#It checks the Vulkan SDK's Bin directory as a hint and CMake's usual search location
+#REQUIRED makes configuration fail if CMake cannot find it.
 find_program(SLANGC_EXECUTABLE
     NAMES slangc
     HINTS "$ENV{VULKAN_SDK}/Bin"
     REQUIRED
 )
 
+#SHADER_SOURCE names the input file and SHADER_OUTPUT names the output file
+#CMAKE_CURRENT_SOURCE_DIR points to the project source directory; CMAKE_CURRENT_BINARY_DIR points to its build directory. That keeps the generated .spv out of my source tree.
 set(SHADER_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/shaders/shader.slang")
 set(SHADER_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/shaders/slang.spv")
 
+#defines a build-time rule for producing slang.spv
+#We create the output directory, then run Slang on shader.slang
+# The rule runs when the output is missing or needs regeneration
+# DEPENDS ties regeneration to changes in shader.slang
+#VERBATIM tells CMake to pass arguments with appropriate escpaing for the build tool
+
+#-fvk-use-entrypoint-name preserves their names in SPIR-V, which matters because the Vulkan pipeline asks for those exact names
 add_custom_command(
     OUTPUT "${SHADER_OUTPUT}"
     COMMAND "${CMAKE_COMMAND}" -E make_directory
@@ -71,9 +89,13 @@ add_custom_command(
     VERBATIM
 )
 
+#add_custom_target gives the shader-generation rule a NAMED target
+# add_dependencies ensures the shader target is built before the Tizon exe
 add_custom_target(TizonShaders DEPENDS "${SHADER_OUTPUT}")
 add_dependencies(Tizon TizonShaders)
 
+#defines TIZON_SHADER_PATH for the Tizon target
+#TIZON_SHADER_PATH macro is ued in Window.cpp to load the file
 target_compile_definitions(Tizon PRIVATE
     TIZON_SHADER_PATH=\"${SHADER_OUTPUT}\"
 )
