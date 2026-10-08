@@ -5,6 +5,7 @@ project(Tizon)
 #find_package(fmt CONFIG REQUIRED)
 
 add_executable(Tizon src/main/engine/Window.cpp)
+target_compile_features(Tizon PRIVATE cxx_std_20) #Tizon needs C++ 20
 
 #target_link_libraries(Tizon PRIVATE fmt::fmt)
 
@@ -26,24 +27,56 @@ target_link_libraries(Tizon PRIVATE glfw Vulkan::Vulkan)
 #find_package (tinygltf REQUIRED)
 #find_package (KTX REQUIRED)
 
-function (add_slang_shader_target TARGET)
-  cmake_parse_arguments ("SHADER" "" "" "SOURCES" ${ARGN})
-  set (SHADERS_DIR ${CMAKE_CURRENT_LIST_DIR}/shaders)
-  set (ENTRY_POINTS -entry vertMain -entry fragMain)
-  add_custom_command (
-          OUTPUT ${SHADERS_DIR}
-          COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADERS_DIR}
-  )
-  add_custom_command (
-          OUTPUT  ${SHADERS_DIR}/slang.spv
-          COMMAND ${SLANGC_EXECUTABLE} ${SHADER_SOURCES} -target spirv -profile spirv_1_4 -emit-spirv-directly -fvk-use-entrypoint-name ${ENTRY_POINTS} -o slang.spv
-          WORKING_DIRECTORY ${SHADERS_DIR}
-          DEPENDS ${SHADERS_DIR} ${SHADER_SOURCES}
-          COMMENT "Compiling Slang Shaders"
-          VERBATIM
-  )
-  add_custom_target (${TARGET} DEPENDS ${SHADERS_DIR}/slang.spv)
-endfunction()
+# function (add_slang_shader_target TARGET)
+#   cmake_parse_arguments ("SHADER" "" "" "SOURCES" ${ARGN})
+#   set (SHADERS_DIR ${CMAKE_CURRENT_LIST_DIR}/shaders)
+#   set (ENTRY_POINTS -entry vertMain -entry fragMain)
+#   add_custom_command (
+#           OUTPUT ${SHADERS_DIR}
+#           COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADERS_DIR}
+#   )
+#   add_custom_command (
+#           OUTPUT  ${SHADERS_DIR}/slang.spv
+#           COMMAND ${SLANGC_EXECUTABLE} ${SHADER_SOURCES} -target spirv -profile spirv_1_4 -emit-spirv-directly -fvk-use-entrypoint-name ${ENTRY_POINTS} -o slang.spv
+#           WORKING_DIRECTORY ${SHADERS_DIR}
+#           DEPENDS ${SHADERS_DIR} ${SHADER_SOURCES}
+#           COMMENT "Compiling Slang Shaders"
+#           VERBATIM
+#   )
+#   add_custom_target (${TARGET} DEPENDS ${SHADERS_DIR}/slang.spv)
+# endfunction()
+find_program(SLANGC_EXECUTABLE
+    NAMES slangc
+    HINTS "$ENV{VULKAN_SDK}/Bin"
+    REQUIRED
+)
+
+set(SHADER_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/shaders/shader.slang")
+set(SHADER_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/shaders/slang.spv")
+
+add_custom_command(
+    OUTPUT "${SHADER_OUTPUT}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory
+            "${CMAKE_CURRENT_BINARY_DIR}/shaders"
+    COMMAND "${SLANGC_EXECUTABLE}" "${SHADER_SOURCE}"
+            -target spirv
+            -profile spirv_1_4
+            -emit-spirv-directly
+            -fvk-use-entrypoint-name
+            -entry vertMain
+            -entry fragMain
+            -o "${SHADER_OUTPUT}"
+    DEPENDS "${SHADER_SOURCE}"
+    COMMENT "Compiling shader.slang to SPIR-V"
+    VERBATIM
+)
+
+add_custom_target(TizonShaders DEPENDS "${SHADER_OUTPUT}")
+add_dependencies(Tizon TizonShaders)
+
+target_compile_definitions(Tizon PRIVATE
+    TIZON_SHADER_PATH=\"${SHADER_OUTPUT}\"
+)
 
 # # set up Vulkan C++ module only if enabled
 # if(ENABLE_CPP20_MODULE)

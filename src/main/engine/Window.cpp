@@ -9,6 +9,7 @@
 #include <limits> //necessary for std::numeric_limits
 #include <algorithm> //necessary for std::clamp
 #include <fstream>
+#include <map>
 
 
 /* In short, to draw the first triangle using VULKAN, we need to:
@@ -123,20 +124,28 @@ static std::vector<char> readFile(const std::string& filename){
 class Window{
     private:
         GLFWwindow *window = nullptr;
-        vk::raii::SurfaceKHR surface = nullptr;
+        
         uint32_t queueIndex = ~0; //initializes the variable to 4294967295 (or 0xFFFFFFFF in hexadecimal). ~ is the Bitwise NOT that flips each of the 32 bits of that integer
         //vk::KHRSwapChainExtensionName is a constant that evaluates to the string "VK_KHR_swapchain", which is the name of the Vulkan extension that enables swap chain functionality. The swap chain is a series of images that are presented to the screen in a loop, allowing for smooth rendering and display of graphics.
         //needed to check if the physical device supports the swap chain extension, which is required for presenting images to the window surface.
         std::vector<const char*> requiredDeviceExtension = {
             vk::KHRSwapchainExtensionName
         }; //list of required device extensions.
-        vk::raii::SwapchainKHR swapChain = nullptr;
+    
+        vk::raii::Context context;
+        vk::raii::Instance instance = nullptr;
+
+        vk::raii::PhysicalDevice physicalDevice = nullptr;
+        vk::raii::Device device = nullptr;
+        vk::raii::Queue queue{nullptr};
+        vk::raii::SurfaceKHR surface = nullptr;
+         vk::raii::SwapchainKHR swapChain = nullptr;
         std::vector<vk::Image> swapChainImages;
         vk::SurfaceFormatKHR   swapChainSurfaceFormat;
         vk::Extent2D           swapChainExtent;
         std::vector<vk::raii::ImageView> swapChainImageViews;
         vk::raii::PipelineLayout pipelineLayout = nullptr;
-        vk::raii::Pipeline graphicsPipeline = nullptr:
+        vk::raii::Pipeline graphicsPipeline = nullptr;
         vk::raii::CommandPool commandPool = nullptr;
         vk::raii::CommandBuffer commandBuffer = nullptr;
 
@@ -144,6 +153,7 @@ class Window{
         vk::raii::Semaphore presentCompleteSemaphore = nullptr;
         vk::raii::Semaphore renderFinishedSemaphore = nullptr;
         vk::raii::Fence drawFence = nullptr;
+        std::vector<vk::PresentModeKHR> availablePresentModes;
 
         //constexpr specified a variable, function, or constructor can be evaluated at compile time
         static constexpr uint32_t WIDTH = 800;
@@ -160,7 +170,7 @@ class Window{
 
         void initVulkan(){
             createInstance();
-            setupDebugMessenger();
+            //setupDebugMessenger();
             createSurface();
             pickPhysicalDevice();
             createLogicalDevice();
@@ -170,7 +180,76 @@ class Window{
             createCommandPool();
             createCommandBuffer();
             createSyncObjects();
+        }
 
+        bool isDeviceSuitable( vk::raii::PhysicalDevice const & physicalDevice )
+        {
+            //Checking if the physicalDevice supports the Vulkan 1.3 API version
+            bool supportsVulkan1_3 = physicalDevice.getProperties().apiVersion >= vk::ApiVersion13;
+
+            //Checking if any of the queue families support graphics operations
+            auto queueFamilies    = physicalDevice.getQueueFamilyProperties();
+            bool supportsGraphics = std::ranges::any_of( queueFamilies, []( auto const & qfp ) { return !!( qfp.queueFlags & vk::QueueFlagBits::eGraphics ); } );
+
+            //Checking if all required physicalDevice extensions are available
+            auto availableDeviceExtensions = physicalDevice.enumerateDeviceExtensionProperties();
+            bool supportsAllRequiredExtensions =
+                std::ranges::all_of( requiredDeviceExtension,
+                                    [&availableDeviceExtensions]( auto const & requiredDeviceExtension )
+                                    {
+                                    return std::ranges::any_of( availableDeviceExtensions,
+                                                                [requiredDeviceExtension]( auto const & availableDeviceExtension )
+                                                                { return strcmp( availableDeviceExtension.extensionName, requiredDeviceExtension ) == 0; } );
+                                    } );
+
+            //Checking if the physicalDevice supports the required features (shader draw parameters, dynamic rendering and extended dynamic state)
+            auto features                 = physicalDevice.template getFeatures2<vk::PhysicalDeviceFeatures2,
+                                                                                vk::PhysicalDeviceVulkan11Features,
+                                                                                vk::PhysicalDeviceVulkan13Features,
+                                                                                vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>();
+            bool supportsRequiredFeatures = features.template get<vk::PhysicalDeviceVulkan11Features>().shaderDrawParameters &&
+                                            features.template get<vk::PhysicalDeviceVulkan13Features>().dynamicRendering &&
+                                            features.template get<vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>().extendedDynamicState;
+
+            //Returning true if the physicalDevice meets all the criteria
+            return supportsVulkan1_3 && supportsGraphics && supportsAllRequiredExtensions && supportsRequiredFeatures;
+        }
+
+        void pickPhysicalDevice()
+        {
+            std::vector<vk::raii::PhysicalDevice> physicalDevices = instance.enumeratePhysicalDevices();
+            auto const devIter = std::ranges::find_if( physicalDevices, [&]( auto const & physicalDevice ) { return isDeviceSuitable( physicalDevice ); } );
+            if ( devIter == physicalDevices.end() )
+            {
+                throw std::runtime_error( "failed to find a suitable GPU!" );
+            }
+            physicalDevice = *devIter;
+        }
+
+        void createInstance(){
+            constexpr vk::ApplicationInfo appInfo{
+                .pApplicationName = "Edmund's Triangle in Vulkan",
+                .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
+                .pEngineName = "No Engine",
+                .engineVersion = VK_MAKE_VERSION(1, 0, 0),
+                .apiVersion = vk::ApiVersion14}; //vulkan 1.4 as baseline
+
+            //Getting the required instance extensions from GLFW
+            uint32_t glfwExtensionCount = 0;
+            auto glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
+
+            //Check if the required GLFW extensions are supported by the Vulkan implementation
+            auto extensionProperties = context.enumerateInstanceExtensionProperties();
+            for(uint32_t i = 0; i < glfwExtensionCount; i++){
+                if(std::ranges::none_of(extensionProperties, [glfwExtension = glfwExtensions[i]](auto const& extensionProperty)
+                    {return strcmp(extensionProperty.extensionName, glfwExtension) == 0;})){
+                        throw std::runtime_error("Required GLFW extension not supported: " + std::string(glfwExtensions[i]));
+                    }
+            }
+
+            vk::InstanceCreateInfo createInfo{.pApplicationInfo = &appInfo, .enabledExtensionCount = glfwExtensionCount, .ppEnabledExtensionNames = glfwExtensions};
+
+            instance = vk::raii::Instance(context, createInfo);
         }
 
         void createSwapChain(){
@@ -207,10 +286,7 @@ class Window{
             swapChain = vk::raii::SwapchainKHR(device, swapChainCreateInfo);
             swapChainImages = swapChain.getImages();
 
-
             };
-
-        }
 
         //parameters for image view creation are specified in a vk::ImageViewCreateInfo structure.
         void createImageViews(){
@@ -243,7 +319,7 @@ class Window{
         }
 
         void createGraphicsPipeline(){
-            auto shaderCode = readFile("shaders/slang.spv");
+            auto shaderCode = readFile(TIZON_SHADER_PATH);
             vk::raii::ShaderModule shaderModule = createShaderModule(shaderCode);
             
             vk::PipelineShaderStageCreateInfo vertShaderStageInfo{.stage = vk::ShaderStageFlagBits::eVertex, .module = shaderModule, .pName = "vertMain"};
@@ -253,8 +329,8 @@ class Window{
             vk::PipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
 
             //dynamic state allows us to change certain aspects of the pipeline without recreating it. For example, we can change the viewport and scissor rectangle dynamically during rendering. This is useful for applications that need to render to different parts of the screen or use multiple viewports.
-            // std::vector<vk::DynamicState> dynamicStates = {vk::DynamicState::eViewport, vk::DynamicState::eScissor};
-            // vk::PipelineDynamicStateCreateInfo dynamicState{.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size()), .pDynamicStates = dynamicStates.data()};
+            std::vector<vk::DynamicState> dynamicStates = {vk::DynamicState::eViewport, vk::DynamicState::eScissor};
+            vk::PipelineDynamicStateCreateInfo dynamicState{.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size()), .pDynamicStates = dynamicStates.data()};
 
             /*
             The vk::PipelineVertexInputStateCreateInfo structure describes the format of the vertex data that will be passed to the vertex shader. It describes this in roughly two ways:
@@ -324,7 +400,7 @@ class Window{
 
                     vk::SampleCountFlagBits::e1 is a Vulkan enumeration token used in the Vulkan-Hpp C++ bindings to specify that a resource (like an image or a framebuffer) uses 1 sample per pixel
             */
-            vk::PipelineMultisampleStateCreateInfo multisampling{.rasterizationSamples = vk::SampleCountFlagBits::e1, .sampleShadingEnabled = vk::False};
+            vk::PipelineMultisampleStateCreateInfo multisampling{.rasterizationSamples = vk::SampleCountFlagBits::e1, .sampleShadingEnable = vk::False};
 
             /*
                 Depth and stencil testing
@@ -373,7 +449,7 @@ class Window{
             pipelineLayout = vk::raii::PipelineLayout(device, pipelineLayoutInfo);
 
             //dynamic rendering allows us to render without creating a render pass and framebuffer objects. Instead, we can specify the attachments and their formats directly in the graphics pipeline. This is useful for applications that need to render to different targets or use multiple render passes.
-            vk::PipelineRenderingCreateInfo pipelineRenderingCreateInfo{.setColorAttachmentCount = 1, .pColorAttachmentFormats &swapChainSurfaceFormat.format};//one color attachement with the format of our swap chainm images
+            vk::PipelineRenderingCreateInfo pipelineRenderingCreateInfo{.colorAttachmentCount = 1, .pColorAttachmentFormats = &swapChainSurfaceFormat.format};//one color attachement with the format of our swap chainm images
             vk::StructureChain<vk::GraphicsPipelineCreateInfo, vk::PipelineRenderingCreateInfo> pipelineCreateInfoChain = {
                 {.stageCount = 2,
                 .pStages             = shaderStages,
@@ -405,6 +481,8 @@ class Window{
                 Each command pool can only allocate command buffers that are submitted on a single type of queue. 
                 We’re going to record commands for drawing, which is why we’ve chosen the graphics queue family.
             */
+
+            //TODO:EDMUND START DEBUGGING HERE
             vk::CommandPoolCreateInfo poolInfo{.flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer, .queueFamilyIndex = queueIndex};
 
             commandPool = vk::raii::CommandPool(device, poolInfo);
@@ -452,7 +530,7 @@ class Window{
             commandBuffer.pipelineBarrier2(dependency_info);
         }
 
-        void recordCommandBuffer(uin32_t imageIndex){
+        void recordCommandBuffer(uint32_t imageIndex){
             commandBuffer.begin({});
 
             //start dynamic rendering
@@ -605,7 +683,7 @@ class Window{
             std::vector<vk::SurfaceFormatKHR> availableFormats = physicalDevice.getSurfaceFormatsKHR(*surface);
 
             //querying the supported presentation modes.
-            std::vector<vk::PresentModeKHR> availablePresentModes = physicalDevice.getSurfacePresentModesKHR(*surface);
+            availablePresentModes = physicalDevice.getSurfacePresentModesKHR(*surface);
         }
 
         vk::SurfaceFormatKHR chooseSwapSurfaceFormat(std::vector<vk::SurfaceFormatKHR> &availableFormats){
@@ -624,7 +702,7 @@ class Window{
         }
 
         vk::PresentModeKHR chooseSwapPresentMode(std::vector<vk::PresentModeKHR> const &availablePresentModes){
-            assert(std::range::any_of(availablePresentModes, [](auto presentMode){return presentMode == vk::PresentModeKHR::eFifo;})); //check if the list of available present modes contains vk::PresentModeKHR::eFifo
+            assert(std::ranges::any_of(availablePresentModes, [](auto presentMode){return presentMode == vk::PresentModeKHR::eFifo;})); //check if the list of available present modes contains vk::PresentModeKHR::eFifo
             
             //[](const vk::PresentModeKHR value) { return vk::PresentModeKHR::eMailbox == value;} this is a lamda function that takes a vk::PresentModeKHR value as input and returns true if the value is equal to vk::PresentModeKHR::eMailbox, and false otherwise. It is used as a predicate in the std::ranges::any_of algorithm to check if any of the available present modes is equal to vk::PresentModeKHR::eMailbox.
             //c++ lambda functions have the structure [captures](parameters) -> return_type { body }. Empty [] means that the lamda does not need to use any variables from the surrounding scope
@@ -667,11 +745,11 @@ class Window{
             
             //the size of the bytecode is specified in bytes but the bytecode pointer is a uin32_t poiniter rather than a char pointer. 
             //Therefore, we need to multiply the size of the code by the size of a char to get the correct size in bytes. The reinterpret_cast<const uint32_t*> is used to convert the pointer type from const char* to const uint32_t*, which is required by Vulkan's shader module creation function.
-            vk::ShaderModuleCreateInfo createInfo{ .codeSize  = code.size() * sizeof(char), pCode = reinterpret_cast<const uint32_t*>(code.data()) };
+            vk::ShaderModuleCreateInfo createInfo{ .codeSize  = code.size() * sizeof(char), .pCode = reinterpret_cast<const uint32_t*>(code.data()) };
             vk::raii::ShaderModule shaderModule{device, createInfo};
             
             //TODO: free the buffer
-            free((void*)code.data()); //free the memory allocated for the shader code after creating the shader module. This is important to avoid memory leaks, as the shader code is no longer needed once the shader module has been created.
+            //free((void*)code.data()); //free the memory allocated for the shader code after creating the shader module. This is important to avoid memory leaks, as the shader code is no longer needed once the shader module has been created.
             return shaderModule;
         }
 
