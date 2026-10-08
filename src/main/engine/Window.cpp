@@ -482,7 +482,6 @@ class Window{
                 We’re going to record commands for drawing, which is why we’ve chosen the graphics queue family.
             */
 
-            //TODO:EDMUND START DEBUGGING HERE
             vk::CommandPoolCreateInfo poolInfo{.flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer, .queueFamilyIndex = queueIndex};
 
             commandPool = vk::raii::CommandPool(device, poolInfo);
@@ -493,7 +492,9 @@ class Window{
             //vk::CommandBufferLevel::ePrimary: Can be submitted to a queue for execution, but cannot be called from other command buffers.
             //vk::CommandBufferLevel::eSecondary: Cannot be submitted directly, but can be called from primary command buffers.
             vk::CommandBufferAllocateInfo allocInfo{.commandPool = commandPool, .level = vk::CommandBufferLevel::ePrimary, .commandBufferCount = 1};
-
+            
+            //The vk::raii::CommandBuffers constructor generates a std::vector<vk::raii::CommandBuffer>, but we just want a single one here, so we move it out of that vector into a singular variable
+            commandBuffer = std::move(vk::raii::CommandBuffers(device, allocInfo).front());
         }
 
         //Before we can start rendering to an image, we need to transition its layout to one that is suitable for rendering. In Vulkan, images can be in different layouts that are optimized for different operations. 
