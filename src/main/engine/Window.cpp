@@ -1,6 +1,7 @@
 #define VULKAN_HPP_NO_STRUCT_CONSTRUCTORS
-#include <vulkan/vulkan_raii.hpp>
+#define VULKAN_HPP_HANDLE_ERROR_OUT_OF_DATE_AS_SUCCESS
 #define GLFW_INCLUDE_VULKAN
+#include <vulkan/vulkan_raii.hpp>
 #include <GLFW/glfw3.h>
 #include <iostream>
 #include <stdexcept>
@@ -10,7 +11,6 @@
 #include <algorithm> //necessary for std::clamp
 #include <fstream>
 #include <map>
-#define VULKAN_HPP_HANDLE_ERROR_OUT_OF_DATE_AS_SUCCESS
 
 
 /* In short, to draw the first triangle using VULKAN, we need to:
