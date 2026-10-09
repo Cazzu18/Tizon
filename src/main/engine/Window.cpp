@@ -10,6 +10,7 @@
 #include <algorithm> //necessary for std::clamp
 #include <fstream>
 #include <map>
+#define VULKAN_HPP_HANDLE_ERROR_OUT_OF_DATE_AS_SUCCESS
 
 
 /* In short, to draw the first triangle using VULKAN, we need to:
@@ -162,6 +163,8 @@ class Window{
 
         std::vector<vk::PresentModeKHR> availablePresentModes;
 
+        bool framebufferResized = false;
+
         //frame index
         uint32_t frameIndex = 0;
 
@@ -172,10 +175,18 @@ class Window{
         void initWindow(){
             glfwInit();
             glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); //do not create an OpenGL context
-            glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE); //disabling window resizing for now
+            glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE); //disabling window resizing for now
             
             //(width, height, title, specify a monitor to open the window on, ONLY RELEVANT to OPENGL)
             window = glfwCreateWindow(WIDTH, HEIGHT, "Tizon Renderer", nullptr, nullptr);
+            glfwSetWindowUserPointer(window, this);//storing an arbitrary pointer inside the reference of the GLFWwindow
+            glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
+        }
+
+        //static because GLFW does not know how to properly call a member functino with the right this pointer to our Tizon instance
+        static void framebufferResizeCallback(GLFWwindow* window, int width, int height){
+            auto app = reinterpret_cast<Window*>(glfwGetWindowUserPointer(window));
+            app->framebufferResized = true;
         }
 
         void initVulkan(){
@@ -296,7 +307,42 @@ class Window{
             swapChain = vk::raii::SwapchainKHR(device, swapChainCreateInfo);
             swapChainImages = swapChain.getImages();
 
-            };
+        };
+
+        /*
+            That’s all it takes to recreate the swap chain! However, the disadvantage of this approach is that we need to stop all renderings before creating the new swap chain. 
+            It is possible to create a new swap chain while drawing commands on an image from the old swap chain are still in-flight. 
+            You need to pass the previous swap chain to the oldSwapchain field in the vk::SwapchainCreateInfoKHR struct and destroy the old swap chain as soon as you’ve finished using it.
+        */
+        void cleanupSwapChain(){
+            swapChainImageViews.clear();
+            swapChain = nullptr;
+        }
+
+        void recreateSwapChain(){
+
+            //handlling window minimization where swap chain may become out of date.
+            //it will resilt in a framebuffer size of 0
+            int width = 0, height = 0;
+            glfwGetFramebufferSize(window, &width, &height); //handles the case where the size is already correct and glfwWaitEvents would have nothing to wait on
+            
+            //The glfwWindowShouldClose check handles the case where the window is closed while still minimized - without it, the loop would spin forever waiting for a frame buffer size that will never become nonzero again.
+            while((width == 0 || height == 0) && !glfwWindowShouldClose(window)){
+                glfwGetFramebufferSize(window, &width, &height);
+                glfwWaitEvents();
+            }
+
+            if(glfwWindowShouldClose(window)){
+                return;
+            }
+
+            device.waitIdle(); //we shouldn't touch resources that are in use!
+
+            cleanupSwapChain();
+
+            createSwapChain();
+            createImageViews();
+        }
 
         //parameters for image view creation are specified in a vk::ImageViewCreateInfo structure.
         void createImageViews(){
@@ -797,13 +843,27 @@ class Window{
         */
        //at the start of the frame we want to wait until the previous frame has finished, so that the command buffer and semaphores are available to use. To do that, we call vk::raii::Device::waitForFences
         void drawFrame(){
+            //Delay resetting the fence until after we know for sure, we will be submitting work with it. Thus, if we return early, the fence is still signaled and vk::raii::Device::waitForFences wont deadlock the next time we use the same fence object.
             auto fenceResult = device.waitForFences(*inFlightFences[frameIndex], vk::True, UINT64_MAX);//last parameter is a timeout(setting to max uint64 basically disables it)
             if(fenceResult != vk::Result::eSuccess){
                 throw std::runtime_error("Failed to wait for FENCE!");
             }
-            device.resetFences(*inFlightFences[frameIndex]); //takes an array of fences and waits on the host for either any or all of the fences to be signaled before returning.
 
             auto [result, imageIndex] = swapChain.acquireNextImage(UINT64_MAX, *presentCompleteSemaphores[frameIndex], nullptr);//the last two parameters specify synchronization objects that are to be signaled when the presentation engine is finished using the image.
+
+            if(result == vk::Result::eErrorOutOfDateKHR){
+                recreateSwapChain();
+                return;
+            }
+
+            //both eSuccess and eSuboptimalKHR are considered "success" return codes
+            if(result != vk::Result::eSuccess && result != vk::Result::eSuboptimalKHR){
+                assert(result == vk::Result::eTimeout || result == vk::Result::eNotReady);
+                throw std::runtime_error("Failed to acquire swap chain image!");
+            }
+
+            //Only reset fence if we are submitting work
+            device.resetFences(*inFlightFences[frameIndex]); //takes an array of fences and waits on the host for either any or all of the fences to be signaled before returning.
 
             commandBuffers[frameIndex].reset();
             recordCommandBuffer(imageIndex);
@@ -841,6 +901,16 @@ class Window{
             //submitting request to present an image to the swap chain
             result = queue.presentKHR(presentInfoKHR);
 
+            if ((result == vk::Result::eSuboptimalKHR) || (result == vk::Result::eErrorOutOfDateKHR) || framebufferResized)
+            {
+                framebufferResized = false;
+                recreateSwapChain();
+            }
+            else
+            {
+                //There are no other success codes than eSuccess; on any error code, presentKHR already threw an exception.
+                assert(result == vk::Result::eSuccess);
+            }
             
             //advancing to next frame each time
             frameIndex = (frameIndex + 1) % MAX_FRAMES_IN_FLIGHT; //modulo ensures we loop around after every MAX_FRAMES_IN_FLIGHT enqueued frames
@@ -856,6 +926,9 @@ class Window{
         }
 
         void cleanup(){
+
+            cleanupSwapChain();
+
             glfwDestroyWindow(window);
             glfwTerminate();
         }
