@@ -121,6 +121,11 @@ static std::vector<char> readFile(const std::string& filename){
     file.close();
     return buffer;
 }
+
+//Desfining how many frames should be processed concurrently. That is, allow the rendering of one frame to not interfere with the recording of the next
+//we choose 2 because although we have 3 images, we don't want the CPU to get too dar ahead of the GPU
+constexpr int MAX_FRAMES_IN_FLIGHT = 2;
+
 class Window{
     private:
         GLFWwindow *window = nullptr;
@@ -147,13 +152,18 @@ class Window{
         vk::raii::PipelineLayout pipelineLayout = nullptr;
         vk::raii::Pipeline graphicsPipeline = nullptr;
         vk::raii::CommandPool commandPool = nullptr;
-        vk::raii::CommandBuffer commandBuffer = nullptr;
 
+        //each frame should have its own CB, set of semaphores, and fence
+        std::vector<vk::raii::CommandBuffer> commandBuffers;
         //semaphores for GPU synchronization and Fence to keep GPU and HOST(CPU) in sync
-        vk::raii::Semaphore presentCompleteSemaphore = nullptr;
-        vk::raii::Semaphore renderFinishedSemaphore = nullptr;
-        vk::raii::Fence drawFence = nullptr;
+        std::vector<vk::raii::Semaphore> presentCompleteSemaphores;
+        std::vector<vk::raii::Semaphore> renderFinishedSemaphores;
+        std::vector<vk::raii::Fence> inFlightFences;
+
         std::vector<vk::PresentModeKHR> availablePresentModes;
+
+        //frame index
+        uint32_t frameIndex = 0;
 
         //constexpr specified a variable, function, or constructor can be evaluated at compile time
         static constexpr uint32_t WIDTH = 800;
@@ -178,7 +188,7 @@ class Window{
             createImageViews();
             createGraphicsPipeline();
             createCommandPool();
-            createCommandBuffer();
+            createCommandBuffers();
             createSyncObjects();
         }
 
@@ -487,14 +497,14 @@ class Window{
             commandPool = vk::raii::CommandPool(device, poolInfo);
         }
 
-        void createCommandBuffer(){
+        void createCommandBuffers(){
             //the level parametr specifies if the allocated cb are primary or secondary
             //vk::CommandBufferLevel::ePrimary: Can be submitted to a queue for execution, but cannot be called from other command buffers.
             //vk::CommandBufferLevel::eSecondary: Cannot be submitted directly, but can be called from primary command buffers.
-            vk::CommandBufferAllocateInfo allocInfo{.commandPool = commandPool, .level = vk::CommandBufferLevel::ePrimary, .commandBufferCount = 1};
+            vk::CommandBufferAllocateInfo allocInfo{.commandPool = commandPool, .level = vk::CommandBufferLevel::ePrimary, .commandBufferCount = MAX_FRAMES_IN_FLIGHT};
             
             //The vk::raii::CommandBuffers constructor generates a std::vector<vk::raii::CommandBuffer>, but we just want a single one here, so we move it out of that vector into a singular variable
-            commandBuffer = std::move(vk::raii::CommandBuffers(device, allocInfo).front());
+            commandBuffers = vk::raii::CommandBuffers(device, allocInfo);
         }
 
         //Before we can start rendering to an image, we need to transition its layout to one that is suitable for rendering. In Vulkan, images can be in different layouts that are optimized for different operations. 
@@ -508,30 +518,32 @@ class Window{
                 vk::PipelineStageFlags2 src_stage_mask,
                 vk::PipelineStageFlags2 dst_stage_mask)
         {
-                vk::ImageMemoryBarrier2 barrier = {
-                    .srcStageMask        = src_stage_mask,
-                    .srcAccessMask       = src_access_mask,
-                    .dstStageMask        = dst_stage_mask,
-                    .dstAccessMask       = dst_access_mask,
-                    .oldLayout           = old_layout,
-                    .newLayout           = new_layout,
-                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                    .image               = swapChainImages[imageIndex],
-                    .subresourceRange    = {
-                        .aspectMask     = vk::ImageAspectFlagBits::eColor,
-                        .baseMipLevel   = 0,
-                        .levelCount     = 1,
-                        .baseArrayLayer = 0,
-                        .layerCount     = 1}};
-                vk::DependencyInfo dependency_info = {
-                    .dependencyFlags         = {},
-                    .imageMemoryBarrierCount = 1,
-                    .pImageMemoryBarriers    = &barrier};
+            auto &commandBuffer = commandBuffers[frameIndex];
+            vk::ImageMemoryBarrier2 barrier = {
+                .srcStageMask        = src_stage_mask,
+                .srcAccessMask       = src_access_mask,
+                .dstStageMask        = dst_stage_mask,
+                .dstAccessMask       = dst_access_mask,
+                .oldLayout           = old_layout,
+                .newLayout           = new_layout,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image               = swapChainImages[imageIndex],
+                .subresourceRange    = {
+                    .aspectMask     = vk::ImageAspectFlagBits::eColor,
+                    .baseMipLevel   = 0,
+                    .levelCount     = 1,
+                    .baseArrayLayer = 0,
+                    .layerCount     = 1}};
+            vk::DependencyInfo dependency_info = {
+                .dependencyFlags         = {},
+                .imageMemoryBarrierCount = 1,
+                .pImageMemoryBarriers    = &barrier};
             commandBuffer.pipelineBarrier2(dependency_info);
         }
 
         void recordCommandBuffer(uint32_t imageIndex){
+            auto &commandBuffer = commandBuffers[frameIndex];
             commandBuffer.begin({});
 
             //start dynamic rendering
@@ -755,9 +767,24 @@ class Window{
         }
 
         void createSyncObjects(){
-            presentCompleteSemaphore = vk::raii::Semaphore(device, vk::SemaphoreCreateInfo());
-            renderFinishedSemaphore  = vk::raii::Semaphore(device, vk::SemaphoreCreateInfo());
-            drawFence                = vk::raii::Fence(device, {.flags = vk::FenceCreateFlagBits::eSignaled});
+            /*
+            Every one of our synchronization objects has two sides: something that signals it, and something that waits on it. 
+            For presentCompleteSemaphores and inFlightFences, both sides are driven by our own frameIndex, so sizing them by MAX_FRAMES_IN_FLIGHT and indexing with frameIndex is correct and sufficient.
+            renderFinishedSemaphores is different: it’s signaled when the graphics queue finishes rendering into a particular swap chain image, and waited on by the presentation engine before it presents that same image. 
+            The presentation engine doesn’t know about our frameIndex - it only knows the imageIndex that vk::raii::SwapchainKHR::acquireNextImage handed us, and that’s the index we have to use to look up which renderFinishedSemaphores entry to signal and which one presentation will wait on.
+            Because a swap chain can (and, depending on the present mode, often does) have more images than MAX_FRAMES_IN_FLIGHT, and because there’s no guarantee that consecutive acquireNextImage calls return image indices in the same repeating pattern as frameIndex, a semaphore sized and indexed by frameIndex could end up being signaled again by a new frame while the presentation engine is still waiting on it from a previous one.
+            */
+            assert(presentCompleteSemaphores.empty() && renderFinishedSemaphores.empty() && inFlightFences.empty());
+
+
+            for(size_t i = 0; i < swapChainImages.size(); i++){
+                renderFinishedSemaphores.emplace_back(device, vk::SemaphoreCreateInfo());
+            }
+
+            for(size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++){
+                presentCompleteSemaphores.emplace_back(device, vk::SemaphoreCreateInfo());
+                inFlightFences.emplace_back(device, vk::FenceCreateInfo{.flags = vk::FenceCreateFlagBits::eSignaled});
+            }
         }
 
         /*
@@ -770,14 +797,15 @@ class Window{
         */
        //at the start of the frame we want to wait until the previous frame has finished, so that the command buffer and semaphores are available to use. To do that, we call vk::raii::Device::waitForFences
         void drawFrame(){
-            auto fenceResult = device.waitForFences(*drawFence, vk::True, UINT64_MAX);//last parameter is a timeout(setting to max uint64 basically disables it)
+            auto fenceResult = device.waitForFences(*inFlightFences[frameIndex], vk::True, UINT64_MAX);//last parameter is a timeout(setting to max uint64 basically disables it)
             if(fenceResult != vk::Result::eSuccess){
                 throw std::runtime_error("Failed to wait for FENCE!");
             }
-            device.resetFences(*drawFence); //takes an array of fences and waits on the host for either any or all of the fences to be signaled before returning.
+            device.resetFences(*inFlightFences[frameIndex]); //takes an array of fences and waits on the host for either any or all of the fences to be signaled before returning.
 
-            auto [result, imageIndex] = swapChain.acquireNextImage(UINT64_MAX, *presentCompleteSemaphore, nullptr);//the last two parameters specify synchronization objects that are to be signaled when the presentation engine is finished using the image.
+            auto [result, imageIndex] = swapChain.acquireNextImage(UINT64_MAX, *presentCompleteSemaphores[frameIndex], nullptr);//the last two parameters specify synchronization objects that are to be signaled when the presentation engine is finished using the image.
 
+            commandBuffers[frameIndex].reset();
             recordCommandBuffer(imageIndex);
 
             //now we can submit the recorded command buffer
@@ -791,28 +819,31 @@ class Window{
             */
             vk::PipelineStageFlags waitDestinationStageMask( vk::PipelineStageFlagBits::eColorAttachmentOutput );
             const vk::SubmitInfo   submitInfo{.waitSemaphoreCount   = 1,
-                                            .pWaitSemaphores      = &*presentCompleteSemaphore,
+                                            .pWaitSemaphores      = &*presentCompleteSemaphores[frameIndex],
                                             .pWaitDstStageMask    = &waitDestinationStageMask,
                                             .commandBufferCount   = 1,
-                                            .pCommandBuffers      = &*commandBuffer,
+                                            .pCommandBuffers      = &*commandBuffers[frameIndex],
                                             .signalSemaphoreCount = 1,
-                                            .pSignalSemaphores    = &*renderFinishedSemaphore};
+                                            .pSignalSemaphores    = &*renderFinishedSemaphores[imageIndex]};
 
-            queue.submit(submitInfo, *drawFence); //We can now submit the command buffer to the graphics queue using vk::raii::Queue::submit
+            queue.submit(submitInfo, *inFlightFences[frameIndex]); //We can now submit the command buffer to the graphics queue using vk::raii::Queue::submit
 
             //The last step of drawing a frame is submitting the result back to the swap chain to have it eventually show up on the screen. Presentation is configured through a vk::PresentInfoKHR structure at the end of the drawFrame function.
             //The first two parameters specify which semaphores to wait on before presentation can happen, just like vk::SubmitInfo. Since we want to wait on the command buffer to finish execution, thus our triangle being drawn, we take the semaphores which will be signaled and wait on them, thus we use renderFinishedSemaphore.
             //The next two parameters specify the swap chains to present images to and the index of the image for each swap chain. This will almost always be single.
             const vk::PresentInfoKHR presentInfoKHR{
                 .waitSemaphoreCount = 1,
-                .pWaitSemaphores    = &*renderFinishedSemaphore,
+                .pWaitSemaphores    = &*renderFinishedSemaphores[imageIndex],
                 .swapchainCount     = 1,
                 .pSwapchains        = &*swapChain,
                 .pImageIndices      = &imageIndex};
             
             //submitting request to present an image to the swap chain
             result = queue.presentKHR(presentInfoKHR);
+
             
+            //advancing to next frame each time
+            frameIndex = (frameIndex + 1) % MAX_FRAMES_IN_FLIGHT; //modulo ensures we loop around after every MAX_FRAMES_IN_FLIGHT enqueued frames
         }
 
         void mainLoop(){
