@@ -101,6 +101,23 @@
 */
 
 /*
+    The vertex buffer we have right now works correctly, but the memory type that allows us to access it from the CPU may not be the most optimal memory type for the graphics card itself to read from. 
+    The most optimal memory has the vk::MemoryPropertyFlagBits::eDeviceLocal flag and is usually not accessible by the CPU on dedicated graphics cards. 
+    So, I'm going to create two vertex buffers. One staging buffer in CPU accessible memory to upload the data from the vertex array to, and the final vertex buffer in device local memory. 
+    I’ll then use a buffer copy command to move the data from the staging buffer to the actual vertex buffer.
+
+    The buffer copy command requires a queue family that supports transfer operations, which is indicated using vk::QueueFlagBits::eTransfer. 
+    The good news is that any queue family with vk::QueueFlagBits::eGraphics or vk::QueueFlagBits::eCompute capabilities already implicitly support vk::QueueFlagBits::eTransfer operations. 
+    The implementation is not required to explicitly list it in queueFlags in those cases.
+
+    you’re not supposed to actually call vk::raii::Device::allocateMemory for every individual buffer. The maximum number of simultaneous memory allocations is limited by the maxMemoryAllocationCount physical device limit,
+    which may be as low as 4096 even on high end hardware like an NVIDIA GTX 1080. The right way to allocate memory for a large number of objects at the same time is to create a custom allocator that splits up a single allocation
+    among many different objects by using the offset parameters that we’ve seen in many functions.
+    I can either implement such an allocator myself, or use the VulkanMemoryAllocator library provided by the GPUOpen initiative. 
+
+*/
+
+/*
     readFile function will read all the bytes from the specified file and return them in a byte array managed by std::vector. 
     We start by opening the file with two flags:
         ate: Start reading at the end of the file
@@ -110,7 +127,7 @@
 */
 
 struct Vertex{
-    glm::vec2 pos;
+    glm::vec3 pos;
     glm::vec3 color;
 
     /*
@@ -151,15 +168,17 @@ struct Vertex{
     */
     static std::array<vk::VertexInputAttributeDescription, 2> getAttributeDescriptions()
     {
-       return {{{.location = 0, .binding = 0, .format = vk::Format::eR32G32Sfloat, .offset = offsetof(Vertex, pos)},
+       return {{{.location = 0, .binding = 0, .format = vk::Format::eR32G32B32Sfloat, .offset = offsetof(Vertex, pos)},
                 {.location = 1, .binding = 0, .format = vk::Format:: eR32G32B32Sfloat, .offset = offsetof(Vertex, color)}}};
     }
 };
 
 const std::vector<Vertex> vertices = {
-    {{0.0f, -0.5f}, {1.0f, 1.0f, 1.0f}},
-    {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
-    {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}
+    {{0.0f, -0.5f, 0.0f}, {1.0f, 1.0f, 1.0f}},
+    {{0.5f, 0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}},
+    {{-0.5f, 0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}},
+    {{-0.5f, 0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}},
+    {{0.5f, 0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}
 };
 
 static std::vector<char> readFile(const std::string& filename){
@@ -626,9 +645,33 @@ class Window{
 
             throw std::runtime_error("failed to find suitable memory type!");
         }
+        
+        //we take reference instead of copies
+        void copyBuffer(vk::raii::Buffer & srcBuffer, vk::raii::Buffer & dstBuffer, vk::DeviceSize size){
+            vk::CommandBufferAllocateInfo allocInfo{.commandPool = commandPool, .level = vk::CommandBufferLevel::ePrimary, .commandBufferCount = 1};
+            vk::raii::CommandBuffer commandCopyBuffer = std::move(device.allocateCommandBuffers(allocInfo).front()); //extracting the first commandbuffer
 
-        //requires me to fill the vk::BufferCreateInfo struct
-        void createVertexBuffer(){
+            //We’re only going to use the command buffer once and wait with returning from the function until the copy operation has finished executing. It’s good practice to tell the driver about our intent using vk::CommandBufferUsageFlagBits::eOneTimeSubmit.
+            commandCopyBuffer.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+            
+            //Contents of buffers are transferred using the vk:raii::CommandBuffer::copyBuffer command. It takes the source and destination buffers as arguments, and an array of regions to copy. 
+            //The regions are defined in vk::BufferCopy structs and consist of a source buffer offset, destination buffer offset and size. It is not possible to specify vk::WholeSize here, unlike the vk::raii::DeviceMemory::mapMemory command.
+            commandCopyBuffer.copyBuffer(*srcBuffer, *dstBuffer, vk::BufferCopy(0, 0, size));
+
+            commandCopyBuffer.end();//since the cb only contains the copy command
+            queue.submit(vk::SubmitInfo{.commandBufferCount = 1, .pCommandBuffers = &*commandCopyBuffer}, nullptr);
+            
+            /*
+                There are again two possible ways to wait on this transfer to complete. We could use a fence and wait with vk::raii::Device::waitForFences, 
+                or simply wait for the transfer queue to become idle with vk::raii::Queue::waitIdle. 
+                A fence would allow you to schedule multiple transfers simultaneously and wait for all of them complete, instead of executing one at a time. T
+                hat may give the driver more opportunities to optimize.
+            */
+            queue.waitIdle();
+
+        }
+
+        std::pair<vk::raii::Buffer, vk::raii::DeviceMemory> createBuffer(vk::DeviceSize size, vk::BufferUsageFlags usage, vk::MemoryPropertyFlags properties){
             /*
                 The size field specifies the size of the buffer in bytes.
                 The usage field indicates for which purposes the data in the buffer is going to be used. It is possible to specify multiple purposes using a bitwise or.
@@ -638,33 +681,57 @@ class Window{
 
 
             */
-            vk::BufferCreateInfo bufferInfo{.size = sizeof(vertices[0]) * vertices.size(),
-                                            .usage = vk::BufferUsageFlagBits::eVertexBuffer,
+            vk::BufferCreateInfo bufferInfo{.size = size,
+                                            .usage = usage,
                                             .sharingMode = vk::SharingMode::eExclusive                                
             };
 
-            vertexBuffer = vk::raii::Buffer(device, bufferInfo);
-            vk::MemoryRequirements memRequirements = vertexBuffer.getMemoryRequirements();
+            vk::raii::Buffer buffer = vk::raii::Buffer(device, bufferInfo);
+            vk::MemoryRequirements memRequirements = buffer.getMemoryRequirements();
 
+            //The most optimal memory has the vk::MemoryPropertyFlagBits::eDeviceLocal flag and is usually not accessible by the CPU on dedicated graphics cards.
             vk::MemoryAllocateInfo memoryAllocateInfo{
                 .allocationSize = memRequirements.size,
-                .memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent)
+                .memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties)
             };
 
-            vertexBufferMemory = vk::raii::DeviceMemory(device, memoryAllocateInfo);
-            vertexBuffer.bindMemory(*vertexBufferMemory, 0); //0 is the offset withing the region  of memory. If the offset is non-zero, then it is required to be divisible by memRequirements.alignment.
+            vk::raii::DeviceMemory bufferMemory = vk::raii::DeviceMemory(device, memoryAllocateInfo);
+            buffer.bindMemory(*bufferMemory, 0); //0 is the offset withing the region  of memory. If the offset is non-zero, then it is required to be divisible by memRequirements.alignment.
+
+            //std::move converts an object with a name into an rvalue reference, enabling move semantics without moving any data at runtime
+            //used to indicate that an object may be "moved from"
+            return {std::move(buffer), std::move(bufferMemory)};
+        }
+
+
+        //requires me to fill the vk::BufferCreateInfo struct
+        void createVertexBuffer(){
             
             /*
                 Unfortunately, the driver may not immediately copy the data into the buffer memory, for example, because of caching. 
                 It is also possible that writes to the buffer are not visible in the mapped memory yet. There are two ways to deal with that problem:
                     Use a memory heap that is host coherent, indicated with vk::MemoryPropertyFlagBits::eHostCoherent: ensures that the mapped memory always matches the contents of the allocated memory.(may lead to slightly worse performance than explicit flushing)
                     Call vk::raii::Device::flushMappedMemoryRanges after writing to the mapped memory, and call vk::raii::Device::invalidateMappedMemoryRanges before reading from the mapped memory
+
+
+                We are using a host visible buffer(eHostVisible) as TEMPORARY buffer and use a device local one as ACTUAL vertex buffer.
+                BECAUSE the most optimal memory has the vk::MemoryPropertyFlagBits::eDeviceLocal flag and is usually not accessible by the CPU on dedicated graphics cards
+
+                vk::BufferUsageFlagBits::eTransferSrc: Buffer can be used as source in a memory transfer operation.
+                vk::BufferUsageFlagBits::eTransferDst: Buffer can be used as destination in a memory transfer operation.
             */
             //This function allows us to access a region of the specified memory resource defined by an offset and size.
-            void* data = vertexBufferMemory.mapMemory(0, bufferInfo.size);
-            memcpy(data, vertices.data(), bufferInfo.size);
-            vertexBufferMemory.unmapMemory();
+            vk::DeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
 
+            auto [stagingBuffer, stagingBufferMemory] = createBuffer(bufferSize, vk::BufferUsageFlagBits::eTransferSrc, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+            
+            void* dataStaging = stagingBufferMemory.mapMemory(0, bufferSize);
+            memcpy(dataStaging, vertices.data(), bufferSize);
+            stagingBufferMemory.unmapMemory();
+
+            std::tie(vertexBuffer, vertexBufferMemory) = createBuffer(bufferSize, vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eTransferDst, vk::MemoryPropertyFlagBits::eDeviceLocal);
+
+            copyBuffer(stagingBuffer, vertexBuffer, bufferSize);
         }
 
         void createCommandBuffers(){
@@ -779,7 +846,7 @@ class Window{
                     firstInstance: Used as an offset for instanced rendering, defines the lowest value of SV_InstanceID.
             */
 
-            //vertex count to pass to draw
+            //vertex count to pass to draw(TODO: determine if static_cast<uint32_t>(vertices.size()) is sufficient)
             vk::MemoryRequirements memReqs = vertexBuffer.getMemoryRequirements();
             vk::DeviceSize totalBytes = memReqs.size; //MemoryRequirements.size returns DeviceSize
             size_t vertexCount = totalBytes / sizeof(Vertex);
