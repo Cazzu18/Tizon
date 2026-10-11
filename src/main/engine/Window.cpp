@@ -100,6 +100,7 @@
             ONLY the vk::PresentModeKHR::eFifo mode is guaranteed to be available
 */
 
+//I SHOULD also store multiple buffers, like the vertex and index buffer, into a SINGLE vk::raii::Buffer and use offsets in commands like vk::raii::CommandBuffer::bindVertexBuffers. The advantage is that data is more cache friendly in that case, because it’s closer together.
 /*
     The vertex buffer we have right now works correctly, but the memory type that allows us to access it from the CPU may not be the most optimal memory type for the graphics card itself to read from. 
     The most optimal memory has the vk::MemoryPropertyFlagBits::eDeviceLocal flag and is usually not accessible by the CPU on dedicated graphics cards. 
@@ -118,6 +119,11 @@
 */
 
 /*
+    Index Buffers
+        An index buffer is essentially an array of pointers into the vertex buffer. It allows you to reorder the vertex data, and reuse existing data for multiple vertices. 
+*/
+
+/*
     readFile function will read all the bytes from the specified file and return them in a byte array managed by std::vector. 
     We start by opening the file with two flags:
         ate: Start reading at the end of the file
@@ -127,7 +133,7 @@
 */
 
 struct Vertex{
-    glm::vec3 pos;
+    glm::vec2 pos;
     glm::vec3 color;
 
     /*
@@ -173,12 +179,17 @@ struct Vertex{
     }
 };
 
+//clockwise
 const std::vector<Vertex> vertices = {
-    {{0.0f, -0.5f, 0.0f}, {1.0f, 1.0f, 1.0f}},
-    {{0.5f, 0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}},
-    {{-0.5f, 0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}},
-    {{-0.5f, 0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}},
-    {{0.5f, 0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}
+    {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}}, //top left
+    {{0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}}, //top right
+    {{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}, // bottom right
+    {{-0.5f, 0.5f}, {1.0f, 1.0f, 1.0f}} //bottom left
+};
+
+//2 bytes
+const std::vector<uint16_t> indices = {
+    0, 1, 2, 2, 3, 0
 };
 
 static std::vector<char> readFile(const std::string& filename){
@@ -241,6 +252,8 @@ class Window{
 
         vk::raii::Buffer vertexBuffer = nullptr;
         vk::raii::DeviceMemory vertexBufferMemory = nullptr;
+        vk::raii::Buffer indexBuffer = nullptr;
+        vk::raii::DeviceMemory indexBufferMemory = nullptr;
 
         //frame index
         uint32_t frameIndex = 0;
@@ -277,6 +290,7 @@ class Window{
             createGraphicsPipeline();
             createCommandPool();
             createVertexBuffer();
+            createIndexBuffer();
             createCommandBuffers();
             createSyncObjects();
         }
@@ -734,6 +748,23 @@ class Window{
             copyBuffer(stagingBuffer, vertexBuffer, bufferSize);
         }
 
+        void createIndexBuffer(){
+            //We create a staging buffer to copy the contents of indices to and then copy it to the final device local index buffer.
+            vk::DeviceSize bufferSize = sizeof(indices[0]) * indices.size();
+
+            auto [stagingBuffer, stagingBufferMemory] = createBuffer(bufferSize, vk::BufferUsageFlagBits::eTransferSrc, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+            
+            void* data = stagingBufferMemory.mapMemory(0, bufferSize);
+            memcpy(data, indices.data(), (size_t) bufferSize);
+            stagingBufferMemory.unmapMemory();
+
+            //std::tie is a function template that creates a std::tuple of Ivalue references to its arguments
+            //it unpacks tuples/pairs, which is the return type of createBuffer
+            std::tie(indexBuffer, indexBufferMemory) = createBuffer(bufferSize, vk::BufferUsageFlagBits::eIndexBuffer | vk::BufferUsageFlagBits::eTransferDst, vk::MemoryPropertyFlagBits::eDeviceLocal);
+
+            copyBuffer(stagingBuffer, indexBuffer, bufferSize);
+        }
+
         void createCommandBuffers(){
             //the level parametr specifies if the allocated cb are primary or secondary
             //vk::CommandBufferLevel::ePrimary: Can be submitted to a queue for execution, but cannot be called from other command buffers.
@@ -830,8 +861,9 @@ class Window{
             // bind vertex buffers to bindings
             //bindVertexBuffers(offset, an array of buffers to bind, an array of the same size of byte offsets to start reading vertex data from)
             commandBuffer.bindVertexBuffers(0, *vertexBuffer, {0});
-            //draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance)
-            commandBuffer.draw(static_cast<uint32_t>(vertices.size()), 1, 0, 0);
+            //binding index buffer
+            commandBuffer.bindIndexBuffer(*indexBuffer, 0, vk::IndexType::eUint16);
+    
 
             //because we specifyed viewport and scissor state to dynamic for the pipeline, we neet to set then in the CB before isuing drawing command
             commandBuffer.setViewport(0, vk::Viewport(0.0f, 0.0f, static_cast<float>(swapChainExtent.width), static_cast<float>(swapChainExtent.height), 0.0f, 1.0f));
@@ -846,11 +878,14 @@ class Window{
                     firstInstance: Used as an offset for instanced rendering, defines the lowest value of SV_InstanceID.
             */
 
-            //vertex count to pass to draw(TODO: determine if static_cast<uint32_t>(vertices.size()) is sufficient)
-            vk::MemoryRequirements memReqs = vertexBuffer.getMemoryRequirements();
-            vk::DeviceSize totalBytes = memReqs.size; //MemoryRequirements.size returns DeviceSize
-            size_t vertexCount = totalBytes / sizeof(Vertex);
-            commandBuffer.draw(vertexCount, 1, 0, 0);
+            /*
+                A call to this function is very similar to vk::raii::CommandBuffer::draw. The first two parameters specify the number of indices and the number of instances. 
+                We’re not using instancing, so just specify 1 instance. The number of indices represents the number of vertices that will be passed to the vertex shader. 
+                The next parameter specifies an offset into the index buffer, using a value of 1 would cause the graphics card to start reading at the second index. 
+                The second to last parameter specifies an offset to add to the vertex index before indexing into the vertex buffer. 
+                The final parameter specifies an offset for instancing, which we’re not using.
+            */
+            commandBuffer.drawIndexed(static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
 
             //end rendering
             commandBuffer.endRendering();
