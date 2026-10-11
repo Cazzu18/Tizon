@@ -1,30 +1,25 @@
-static float2 positions[3] = float2[](
-    float2(0.0, -0.5),
-    float2(0.5, 0.5),
-    float2(-0.5, 0.5)
-);
+// we will be taking input from a vertex buffer using the structs
+//The inPosition and inColor variables are vertex attributes. 
+//They’re properties that are specified per-vertex in the vertex buffer 
+struct VSInput {
+    float2 inPosition;
+    float3 inColor;
+}
 
-static float3 colors[3] = float3[](
-    float3(1.0, 0.0, 0.0),
-    float3(0.0, 0.1, 0.0),
-    float3(0.0, 0.0, 0.1)
-);
-
-struct VertexOutput {
+struct VSOutput {
     float3 color;
-    float4 sv_position : SV_Position;
+    float4 pos : SV_Position;
 };
 
 [shader("vertex")]
-VertexOutput vertMain(uint vid: SV_VertexID) {
-    VertexOutput output;
-    output.sv_position = float4(positions[vid], 0.0, 1.0);
-    output.color = colors[vid];
+VSOutput vertMain(VSInput input) {
+    VSOutput output;
+    output.pos = float4(input.inPosition, 0.0, 1.0);
+    output.color = input.inColor;
     return output;
 }
 
 [shader("fragment")]
-float4 fragMain(VertexOutput inVert) : SV_Target {
-    float3 color = inVert.color;
-    return float4(color, 1.0);
+float4 fragMain(VSOutput vertIn) : SV_Target {
+    return float4(vertIn.color, 1.0);
 }

@@ -11,6 +11,7 @@
 #include <algorithm> //necessary for std::clamp
 #include <fstream>
 #include <map>
+#include <glm/glm.hpp> //linear algebra related types like vectors and matrices
 
 
 /* In short, to draw the first triangle using VULKAN, we need to:
@@ -107,6 +108,60 @@
 
     The advantage of starting to read at the end of the file is that we can use the read position to determine the size of the file and allocate a buffer:
 */
+
+struct Vertex{
+    glm::vec2 pos;
+    glm::vec3 color;
+
+    /*
+    telling Vulkan how to pass this data format to the vertex shader once it’s been uploaded into GPU memory.
+    A vertex binding describes at which rate to load data from memory throughout the vertices. It specifies the number of bytes between data entries and whether to move to the next data entry after each vertex or after each instance.
+    All of our per-vertex data is packed together in one array, so we’re only going to have one binding. 
+
+    The binding parameter specifies the index of the binding in the array of bindings. 
+    The stride parameter specifies the number of bytes from one entry to the next, and the inputRate parameter can have one of the following values:
+        vk::VertexInputRate::eVertex : Move to the next data entry after each vertex
+        vk::VertexInputRate::eInstance: Move to the next data entry after each instance
+
+    */
+    static vk::VertexInputBindingDescription getBindingDescription()
+    {
+        return {.binding = 0, .stride = sizeof(Vertex), .inputRate = vk::VertexInputRate::eVertex};
+    }
+
+    /*
+        As the function prototype indicates, there are going to be two of these structures. An attribute description struct describes how to extract a vertex attribute from a chunk of vertex data originating from a binding description. 
+        We have two attributes, position and color, so we need two attribute description structs.
+
+        The location parameter references the location directive of the input in the vertex shader. The input in the vertex shader with location 0 is the position, which has two 32-bit float components. T
+        he binding parameter tells Vulkan from which binding the per-vertex data comes.
+        The format parameter describes the type of data for the attribute. 
+        
+        A bit confusingly, the formats are specified using the same enumeration as color formats. The following shader types and formats are commonly used together:
+            float : vk::Format::eR32Sfloat
+
+            float2: vk::Format::eR32G32Sfloat
+
+            float3: vk::Format::eR32G32B32Sfloat
+
+            float4: vk::Format::eR32G32B32A32Sfloat
+
+        The format parameter implicitly defines the byte size of attribute data and the offset parameter has specified the number of bytes since the start of the per-vertex data to read from. 
+        The binding is loading one Vertex at a time and the position attribute (pos) is at an offset of 0 bytes from the beginning of this struct. 
+    */
+    static std::array<vk::VertexInputAttributeDescription, 2> getAttributeDescriptions()
+    {
+       return {{{.location = 0, .binding = 0, .format = vk::Format::eR32G32Sfloat, .offset = offsetof(Vertex, pos)},
+                {.location = 1, .binding = 0, .format = vk::Format:: eR32G32B32Sfloat, .offset = offsetof(Vertex, color)}}};
+    }
+};
+
+const std::vector<Vertex> vertices = {
+    {{0.0f, -0.5f}, {1.0f, 1.0f, 1.0f}},
+    {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
+    {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}
+};
+
 static std::vector<char> readFile(const std::string& filename){
     std::ifstream file(filename, std::ios::ate | std::ios::binary); //open the file in binary mode and start reading from the end of the file (ate)
 
@@ -165,6 +220,9 @@ class Window{
 
         bool framebufferResized = false;
 
+        vk::raii::Buffer vertexBuffer = nullptr;
+        vk::raii::DeviceMemory vertexBufferMemory = nullptr;
+
         //frame index
         uint32_t frameIndex = 0;
 
@@ -199,6 +257,7 @@ class Window{
             createImageViews();
             createGraphicsPipeline();
             createCommandPool();
+            createVertexBuffer();
             createCommandBuffers();
             createSyncObjects();
         }
@@ -257,6 +316,9 @@ class Window{
 
             //Getting the required instance extensions from GLFW
             uint32_t glfwExtensionCount = 0;
+
+            //Retrieves platform-specific Window System Integration (WSI) extensions (such as VK_KHR_surface and surface extensions for Win32, X11, Wayland, or macOS
+            //Returns  An array of ASCII-encoded extension names, or NULL if Vulkan is unavailable on the machine.
             auto glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
 
             //Check if the required GLFW extensions are supported by the Vulkan implementation
@@ -393,7 +455,14 @@ class Window{
                 Bindings: spacing between data and whether the data is per-vertex or per-instance (see instancing)
                 Attribute descriptions: type of the attributes passed to the vertex shader, which binding to load them from and at which offset
             */
-            vk::PipelineVertexInputStateCreateInfo vertexInputInfo;//we hard coded vertex data in the shader, so we don't need to specify any vertex input bindings or attribute descriptions. Therefore, we can leave the fields of this structure at their default values.
+           auto bindingDescription = Vertex::getBindingDescription();
+           auto attributeDescriptions = Vertex::getAttributeDescriptions();
+            vk::PipelineVertexInputStateCreateInfo vertexInputInfo{.vertexBindingDescriptionCount = 1,
+                                                                   .pVertexBindingDescriptions = &bindingDescription,
+                                                                   .vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size()),
+                                                                   .pVertexAttributeDescriptions = attributeDescriptions.data()
+
+            };
 
             /*
             Input assembly:
@@ -543,6 +612,61 @@ class Window{
             commandPool = vk::raii::CommandPool(device, poolInfo);
         }
 
+        //The typeFilter parameter will be used to specify the bit field of memory types that are suitable. That means that we can find the index of a suitable memory type by simply iterating over them and checking if the corresponding bit is set to 1.
+        uint32_t findMemoryType(uint32_t typeFilter, vk::MemoryPropertyFlags properties){
+            vk::PhysicalDeviceMemoryProperties memProperties = physicalDevice.getMemoryProperties();
+            for(uint32_t i = 0; i < memProperties.memoryTypeCount; i++){
+                //We may have more than one desirable property, so we should check if the result of the bitwise AND is not just non-zero, but equal to the desired properties bit field. 
+                //If there is a memory type suitable for the buffer that also has all the properties we need, then we return its index, otherwise we throw an exception.
+                //memProperties.memoryTypes[i].propertyFlags & properties returns, in bits, the result of the and, so we need to check if that result is the same as properties
+                if((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties){
+                    return i;
+                }
+            }
+
+            throw std::runtime_error("failed to find suitable memory type!");
+        }
+
+        //requires me to fill the vk::BufferCreateInfo struct
+        void createVertexBuffer(){
+            /*
+                The size field specifies the size of the buffer in bytes.
+                The usage field indicates for which purposes the data in the buffer is going to be used. It is possible to specify multiple purposes using a bitwise or.
+                
+                Just like the images in the swap chain, buffers can also be owned by a specific queue family or be shared between multiple at the same time. 
+                The buffer will only be used from the graphics queue, so we can stick to exclusive access.
+
+
+            */
+            vk::BufferCreateInfo bufferInfo{.size = sizeof(vertices[0]) * vertices.size(),
+                                            .usage = vk::BufferUsageFlagBits::eVertexBuffer,
+                                            .sharingMode = vk::SharingMode::eExclusive                                
+            };
+
+            vertexBuffer = vk::raii::Buffer(device, bufferInfo);
+            vk::MemoryRequirements memRequirements = vertexBuffer.getMemoryRequirements();
+
+            vk::MemoryAllocateInfo memoryAllocateInfo{
+                .allocationSize = memRequirements.size,
+                .memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent)
+            };
+
+            vertexBufferMemory = vk::raii::DeviceMemory(device, memoryAllocateInfo);
+            vertexBuffer.bindMemory(*vertexBufferMemory, 0); //0 is the offset withing the region  of memory. If the offset is non-zero, then it is required to be divisible by memRequirements.alignment.
+            
+            /*
+                Unfortunately, the driver may not immediately copy the data into the buffer memory, for example, because of caching. 
+                It is also possible that writes to the buffer are not visible in the mapped memory yet. There are two ways to deal with that problem:
+                    Use a memory heap that is host coherent, indicated with vk::MemoryPropertyFlagBits::eHostCoherent: ensures that the mapped memory always matches the contents of the allocated memory.(may lead to slightly worse performance than explicit flushing)
+                    Call vk::raii::Device::flushMappedMemoryRanges after writing to the mapped memory, and call vk::raii::Device::invalidateMappedMemoryRanges before reading from the mapped memory
+            */
+            //This function allows us to access a region of the specified memory resource defined by an offset and size.
+            void* data = vertexBufferMemory.mapMemory(0, bufferInfo.size);
+            memcpy(data, vertices.data(), bufferInfo.size);
+            vertexBufferMemory.unmapMemory();
+
+        }
+
         void createCommandBuffers(){
             //the level parametr specifies if the allocated cb are primary or secondary
             //vk::CommandBufferLevel::ePrimary: Can be submitted to a queue for execution, but cannot be called from other command buffers.
@@ -636,6 +760,12 @@ class Window{
             //The first parameter specifies if the pipeline object is a graphics or compute pipeline.
             commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, *graphicsPipeline);
 
+            // bind vertex buffers to bindings
+            //bindVertexBuffers(offset, an array of buffers to bind, an array of the same size of byte offsets to start reading vertex data from)
+            commandBuffer.bindVertexBuffers(0, *vertexBuffer, {0});
+            //draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance)
+            commandBuffer.draw(static_cast<uint32_t>(vertices.size()), 1, 0, 0);
+
             //because we specifyed viewport and scissor state to dynamic for the pipeline, we neet to set then in the CB before isuing drawing command
             commandBuffer.setViewport(0, vk::Viewport(0.0f, 0.0f, static_cast<float>(swapChainExtent.width), static_cast<float>(swapChainExtent.height), 0.0f, 1.0f));
             commandBuffer.setScissor(0, vk::Rect2D(vk::Offset2D(0, 0), swapChainExtent));
@@ -648,7 +778,12 @@ class Window{
                     firstVertex: Used as an offset into the vertex buffer, defines the lowest value of SV_VertexId.
                     firstInstance: Used as an offset for instanced rendering, defines the lowest value of SV_InstanceID.
             */
-            commandBuffer.draw(3, 1, 0, 0);
+
+            //vertex count to pass to draw
+            vk::MemoryRequirements memReqs = vertexBuffer.getMemoryRequirements();
+            vk::DeviceSize totalBytes = memReqs.size; //MemoryRequirements.size returns DeviceSize
+            size_t vertexCount = totalBytes / sizeof(Vertex);
+            commandBuffer.draw(vertexCount, 1, 0, 0);
 
             //end rendering
             commandBuffer.endRendering();
