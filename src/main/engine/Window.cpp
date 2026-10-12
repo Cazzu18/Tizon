@@ -1,6 +1,7 @@
 #define VULKAN_HPP_NO_STRUCT_CONSTRUCTORS
 #define VULKAN_HPP_HANDLE_ERROR_OUT_OF_DATE_AS_SUCCESS
 #define GLFW_INCLUDE_VULKAN
+#define STB_IMAGE_IMPLEMENTATION
 #include <vulkan/vulkan_raii.hpp>
 #include <GLFW/glfw3.h>
 #include <iostream>
@@ -14,6 +15,7 @@
 #include <glm/glm.hpp> //linear algebra related types like vectors and matrices
 #include <glm/gtc/matrix_transform.hpp> // exposes functions that can be used to generate model transformations like glm::rotate, view transformations like glm::lookAt and projection transformations like glm::perspective.
 #include <chrono> //exposes functions to do precise timekeeping
+#include <stb_image.h>
 
 
 /* In short, to draw the first triangle using VULKAN, we need to:
@@ -211,6 +213,66 @@
 */
 
 /*
+    Texture Mapping:
+        Adding a texture to my application will involve the following:
+            - Create an image object backed by device memory
+            - Fill it with pixels from an image file
+            - Create an image sampler
+            - Add a combined image sampler descriptor to SAMPLE colors from the texure
+
+        I’ll start by creating a staging resource and filling it with pixel data and then we copy this to the final image object that we’ll use for rendering. 
+        Although it is possible to create a staging image for this purpose, Vulkan also allows you to directly copy pixels from a buffer to an image. 
+        That’s less verbose, less limited and usually faster. For that we’ll first create such a buffer that is accessible by the host and fill it with pixel values, and then we’ll create an image to copy the pixels to. 
+        Creating an image is not very different from creating buffers. It involves querying the memory requirements, allocating device memory and binding it
+
+        There is something extra that we’ll have to take care of when working with images. Images can have different layouts that affect how the pixels are organized in memory. 
+        Due to the way graphics hardware works, simply storing the pixels row by row may not lead to the best performance, for example. When performing any operation on images, you must make sure that they have the layout that is optimal for use in that operation. 
+        We’ve actually already seen some of these layouts when we specified the render pass:
+            vk::ImageLayout::ePresentSrcKHR: Optimal for presentation
+            vk::ImageLayout::eColorAttachmentOptimal: Optimal as attachment for writing colors from the fragment shader
+            vk::ImageLayout::eTransferSrcOptimal: Optimal as source in a transfer operation, like vk::raii::CommandBuffer::copyImageToBuffer
+            vk::ImageLayout::eTransferDstOptimal: Optimal as destination in a transfer operation, like vk::raii::CommandBuffer::copyBufferToImage
+            vk::ImageLayout::eShaderReadOnlyOptimal: Optimal for sampling from a shader
+
+        One of the most common ways to transition the layout of an image is a pipeline barrier. Pipeline barriers are primarily used for synchronizing access to resources, like making sure that an image was written to before it is read, but they can also be used to transition layouts.
+
+        Images should always reside in GPU memory. Leaving them in host only visible memory would require the GPU to read data via the PCI interface for each frame, which has a much smaller bandwidth than the GPU’s memory. 
+        That would cause a big performance impact. Staging is the process of getting image data into the GPU’s memory. It is not always required, as devices may offer a memory type that’s both host visible and device local. It’s possible to skip staging on such configurations.
+
+        IMAGES in VULKAN can exist in different layouts that affect how the pixel data is organized in memory. These layouts are optimized for specific operations - some layouts are better for reading from shaders, others for being render targets, and yet others for being the source or destination of transfer operations.
+        Layout transitions are a crucial aspect of Vulkan’s design that gives you explicit control over these memory organizations. Unlike in some other graphics APIs where the driver automatically handles these transitions, Vulkan requires you to manage them explicitly. This approach allows for better performance optimization as you can schedule transitions exactly when needed and batch operations efficiently.
+        For my texture image, I'll need to perform several transitions: 1. From the initial undefined layout to a layout optimized for receiving data (transfer destination) 2. From transfer destination to a layout optimized for shader reading, so our fragment shader can sample from it
+        These transitions are performed using pipeline barriers, which not only change the image layout but also ensure proper synchronization between operations that access the image. Without proper synchronization, we might end up with race conditions where the shader tries to read from the texture before the copy operation has completed.
+
+        One thing to NOTE is that command buffer submission results in implicit vk::AccessFlagBits::eHostWrite synchronization at the beginning. Since the transitionImageLayout function executes a command buffer with only a single command, you could use this implicit synchronization and set srcAccessMask to 0 if you ever needed a vk::AccessFlagBits::eHostWrite dependency in a layout transition.
+
+        There is actually a special type of image layout that supports all operations, vk::ImageLayout::eGeneral. However, it might come at a cost as it may disable certain optimizations on some GPUs if we're not using certain extensions.
+        t is required for some special cases, like using an image as both input and output, or for reading an image after it has left the preinitialized layout.
+
+        
+
+        SAMPLERS:
+            It is possible for shaders to read texels directly from images, but that is not very common when they are used as textures. Textures are usually accessed through samplers, which will apply filtering and transformations to compute the final color that is retrieved.
+            These filters are helpful to deal with problems like oversampling. 
+            Undersampling is the opposite problem, where you have more texels than fragments. This will lead to artifacts when sampling high frequency patterns like a checkerboard texture at a sharp angle. Its basically just a blurry mess. The solution is anisotripc filtering, which can automatically be applied by a sampler!
+
+            anisotropic filtering is a technique that improves appearance of textures, especially on textures viewed at sharp angles. It helps make textures look sharper and more detailed by reducing blur and aliasing that can occur when surfaces are angled away from the viewer. Anisotropic filtering works by applying different amounts of filtering in different directions, unlike simpler methods like bilinear and trilinear filtering which filter equally in all directions.
+            Anisotropic filtering enhances texture sharpness, counteracting the blur introduced by mipmapping, a common anti-aliasing technique. Anisotropic filtering can therefore be said to maintain crisp texture detail at all viewing orientations while providing fast anti-aliased texture filtering.
+            
+
+            Aside from these filters, a sampler can also take care of transformations. It determines what happens when you try to read texels outside the image through its addressing mode.
+
+
+        COMBINED IMAGE SAMPLER(type of descriptor):
+            This descriptor makes it possible for shaders to access an image resource through a sampler object
+
+            It’s worth noting that Vulkan provides flexibility in how textures are accessed in shaders through different descriptor types. While we’ll be using a combined image sampler in this tutorial, Vulkan also supports separate descriptors for samplers (vk::DescriptorType::eSampler) and sampled images (vk::DescriptorType::eSampledImage). 
+            Using separate descriptors allows you to reuse the same sampler with multiple images or access the same image with different sampling parameters. This can be more efficient in scenarios where you have many textures that use identical sampling configurations. However, the combined image sampler is often more convenient and can offer better performance on some hardware due to optimized cache usage.
+
+
+*/
+
+/*
     readFile function will read all the bytes from the specified file and return them in a byte array managed by std::vector. 
     We start by opening the file with two flags:
         ate: Start reading at the end of the file
@@ -222,6 +284,7 @@
 struct Vertex{
     glm::vec2 pos;
     glm::vec3 color;
+    glm::vec2 texCoord;
 
     /*
     telling Vulkan how to pass this data format to the vertex shader once it’s been uploaded into GPU memory.
@@ -259,13 +322,13 @@ struct Vertex{
         The format parameter implicitly defines the byte size of attribute data and the offset parameter has specified the number of bytes since the start of the per-vertex data to read from. 
         The binding is loading one Vertex at a time and the position attribute (pos) is at an offset of 0 bytes from the beginning of this struct. 
     */
-    static std::array<vk::VertexInputAttributeDescription, 2> getAttributeDescriptions()
+    static std::array<vk::VertexInputAttributeDescription, 3> getAttributeDescriptions()
     {
        return {{{.location = 0, .binding = 0, .format = vk::Format::eR32G32B32Sfloat, .offset = offsetof(Vertex, pos)},
-                {.location = 1, .binding = 0, .format = vk::Format:: eR32G32B32Sfloat, .offset = offsetof(Vertex, color)}}};
+                {.location = 1, .binding = 0, .format = vk::Format:: eR32G32B32Sfloat, .offset = offsetof(Vertex, color)},
+                {.location = 2, .binding = 0, .format = vk::Format::eR32G32Sfloat, .offset = offsetof(Vertex, texCoord)}}};
     }
 };
-
 
 struct UniformBufferObject {
     alignas(16) glm::mat4 model;
@@ -274,11 +337,12 @@ struct UniformBufferObject {
 };
 
 //clockwise
+//simply filling the square with the texture by using coordinates from 0, 0 in the top-left corner to 1, 1 in the bottom-right corner. 
 const std::vector<Vertex> vertices = {
-    {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}}, //top left
-    {{0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}}, //top right
-    {{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}, // bottom right
-    {{-0.5f, 0.5f}, {1.0f, 1.0f, 1.0f}} //bottom left
+    {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}}, //bottom left
+    {{0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}}, //bottom right
+    {{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}}, //top right
+    {{-0.5f, 0.5f}, {1.0f, 1.0f, 1.0f}, {1.0f, 1.0f}} //top left
 };
 
 //2 bytes
@@ -357,6 +421,12 @@ class Window{
         vk::raii::DescriptorPool descriptorPool = nullptr;
         std::vector<vk::raii::DescriptorSet> descriptorSets;
 
+        //texture mapping
+        vk::raii::Image textureImage = nullptr;
+        vk::raii::DeviceMemory textureImageMemory = nullptr;
+        vk::raii::ImageView textureImageView = nullptr; //images are accessed via imageviews
+        vk::raii::Sampler textureSampler = nullptr;
+
         //frame index
         uint32_t frameIndex = 0;
 
@@ -392,6 +462,9 @@ class Window{
             createDescriptorSetLayout();
             createGraphicsPipeline();
             createCommandPool();
+            createTextureImage();
+            createTextureImageView();
+            createTextureSampler();
             createVertexBuffer();
             createIndexBuffer();
             createUniformBuffers();
@@ -423,13 +496,13 @@ class Window{
 
             //Checking if the physicalDevice supports the required features (shader draw parameters, dynamic rendering and extended dynamic state)
             auto features                 = physicalDevice.template getFeatures2<vk::PhysicalDeviceFeatures2,
-                                                                                vk::PhysicalDeviceVulkan11Features,
                                                                                 vk::PhysicalDeviceVulkan13Features,
                                                                                 vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>();
-            bool supportsRequiredFeatures = features.template get<vk::PhysicalDeviceVulkan11Features>().shaderDrawParameters &&
-                                            features.template get<vk::PhysicalDeviceVulkan13Features>().dynamicRendering &&
-                                            features.template get<vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>().extendedDynamicState;
-
+            
+            bool supportsRequiredFeatures = features.template get<vk::PhysicalDeviceFeatures2>().features.samplerAnisotropy &&
+		                                features.template get<vk::PhysicalDeviceVulkan13Features>().dynamicRendering &&
+		                                features.template get<vk::PhysicalDeviceVulkan13Features>().synchronization2 &&
+		                                features.template get<vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>().extendedDynamicState;
             //Returning true if the physicalDevice meets all the criteria
             return supportsVulkan1_3 && supportsGraphics && supportsAllRequiredExtensions && supportsRequiredFeatures;
         }
@@ -548,19 +621,14 @@ class Window{
         //parameters for image view creation are specified in a vk::ImageViewCreateInfo structure.
         void createImageViews(){
             assert(swapChainImageViews.empty()); //check that the vector is empty before we start adding image views to it
-            
-
-            //he components field allows you to swizzle the color channels around. For example, you can map all the channels to the red channel for a monochrome texture. You can also map constant values of 0 and 1 to a channel. 
-            vk::ImageViewCreateInfo imageViewCreateInfo{
-                .viewType = vk::ImageViewType::e2D, //specifies that the image view will be a 2D texture. This is appropriate for most images used in rendering, such as color attachments or textures.
-                .format = swapChainSurfaceFormat.format, //specifies  how the colorspace components are configured so you get the right color format in the renders
-                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1} //The subresourceRange field describes what the image’s purpose is and which part of the image should be accessed. My images will be used as color targets without any mipmapping levels or multiple layers. In this case, we are accessing the color aspect of the image, starting from mip level 0 and layer 0, and accessing only one mip level and one layer.
-            };
-
-            for(auto &image : swapChainImages){
-                imageViewCreateInfo.image = image;
-                swapChainImageViews.emplace_back(device, imageViewCreateInfo);
+                        
+            //.reserve(new_cap) is used to pre-allocate memory for a vector to hold at least a specified number of elements without triggering internal reallocations
+            swapChainImageViews.reserve(swapChainImages.size());
+            for ( auto &image: swapChainImages )
+            {
+                swapChainImageViews.emplace_back(createImageView(image, swapChainSurfaceFormat.format));
             }
+            
         }
 
 
@@ -585,11 +653,11 @@ class Window{
                 All the descriptor bindings are combined into a single vk::raii::DescriptorSetLayout object.
 
             */
-            vk::DescriptorSetLayoutBinding uboLayoutBinding{
-                .binding = 0, .descriptorType = vk::DescriptorType::eUniformBuffer, .descriptorCount = 1, .stageFlags = vk::ShaderStageFlagBits::eVertex
-            };
+            std::array<vk::DescriptorSetLayoutBinding, 2> bindings{
+                {{.binding = 0, .descriptorType = vk::DescriptorType::eUniformBuffer, .descriptorCount = 1, .stageFlags = vk::ShaderStageFlagBits::eVertex},
+                {.binding = 1, .descriptorType = vk::DescriptorType::eCombinedImageSampler, .descriptorCount = 1, .stageFlags = vk::ShaderStageFlagBits::eFragment}}};
 
-            vk::DescriptorSetLayoutCreateInfo layoutInfo{.bindingCount = 1, .pBindings = &uboLayoutBinding};
+            vk::DescriptorSetLayoutCreateInfo layoutInfo{.bindingCount = static_cast<uint32_t>(bindings.size()), .pBindings = bindings.data()};
             
             // /We need to specify the descriptor set layout during pipeline creation to tell Vulkan which descriptors the shaders will be using. Descriptor set layouts are specified in the pipeline layout object.
             descriptorSetLayout = vk::raii::DescriptorSetLayout(device, layoutInfo);
@@ -771,6 +839,229 @@ class Window{
             commandPool = vk::raii::CommandPool(device, poolInfo);
         }
 
+        std::pair<vk::raii::Image, vk::raii::DeviceMemory> createImage(uint32_t width, uint32_t height, vk::Format format, vk::ImageTiling tiling, vk::ImageUsageFlags usage, vk::MemoryPropertyFlags properties){
+            //Although we could set up the shader to access the pixel values in the buffer, it’s better to use image objects in Vulkan for this purpose. Image objects will make it easier and faster to retrieve colors by allowing us to use 2D coordinates, for one. 
+            //pixels within an image object are known as texels
+
+            /*
+                The image type, specified in the imageType field, tells Vulkan with what kind of coordinate system the texels in the image are going to be addressed. It is possible to create 1D, 2D and 3D images. One dimensional images can be used to store an array of data or gradient, two dimensional images are mainly used for textures, and three dimensional images can be used to store voxel volumes, for example. 
+                The extent field specifies the dimensions of the image, basically how many texels there are on each axis. That’s why depth must be 1 instead of 0. Our texture will not be an array and we won’t be using mipmapping for now.
+                Vulkan supports many possible image formats, but we should use the same format for the texels as the pixels in the buffer, otherwise the copy operation will fail.
+                The tiling specifies how texels are arranged in memory. Vulkan supports two fundamentally different modes for this:
+                    vk::ImageTiling::eOptimal: Texels are laid out in an implementation-dependent arrangement. This results in a more efficient memory access.
+                    vk::ImageTiling::eLinear: Texels are laid out in memory in row-major order, possibly with some padding on each row.
+
+                There are only two possible values for the initialLayout of an image:
+                    vk::ImageLayout::eUndefined: Not usable by the GPU and the very first transition will discard the texels.
+                    vk::ImageLayout::ePreinitialized: Not usable by the GPU, but the first transition will preserve the texels.
+
+                we’re first going to transition the image to be a transfer destination and then copy texel data to it from a buffer object, so we don’t need this property and can safely use vk::ImageLayout::eUndefined.
+
+                The usage field has the same semantics as the one during buffer creation. The image is going to be used as destination for the buffer copy, so it should be set up as a transfer destination.
+                We also want to be able to access the image from the shader to color our mesh, so the usage should include vk::ImageUsageFlagBits::eSampled.
+
+                The image will only be used by one queue family: the one that supports graphics (and therefore also) transfer operations.
+                The samples flag is related to multisampling. This is only relevant for images that will be used as attachments
+            */
+            vk::ImageCreateInfo imageInfo{.imageType = vk::ImageType::e2D,
+                                            .format = format,
+                                            .extent = {width, height, 1},
+                                            .mipLevels = 1,
+                                            .arrayLayers = 1,
+                                            .samples = vk::SampleCountFlagBits::e1,
+                                            .tiling = tiling,
+                                            .usage = usage,
+                                            .sharingMode = vk::SharingMode::eExclusive};
+            
+            //Note: It is possible that the vk::Format::eR8G8B8A8Srgb, format is not supported by the graphics hardware.
+            vk::raii::Image image = vk::raii::Image(device, imageInfo);
+            vk::MemoryRequirements memRequirements = image.getMemoryRequirements();
+            vk::MemoryAllocateInfo allocInfo{.allocationSize = memRequirements.size, .memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties)};
+            vk::raii::DeviceMemory imageMemory = vk::raii::DeviceMemory(device, allocInfo);
+            image.bindMemory(imageMemory, 0);
+
+            return {std::move(image), std::move(imageMemory)};
+        }
+
+        void createTextureImage(){
+            int texWidth, texHeight, texChannels;
+
+            //stbi_load akes the file path and number of channels to load as arguments. The STBI_rgb_alpha value forces the image to be loaded with an alpha channel, even if it doesn’t have one, which is nice for consistency with other textures in the future. 
+            //The middle three parameters are outputs for the width, height and actual number of channels in the image. The pointer that is returned is the first element in an array of pixel values. The pixels are laid out row by row with 4 bytes per pixel in the case of STBI_rgb_alpha for a total of texWidth * texHeight * 4 values
+            //stbi_uc is a C typedef in stb_image.h defined as an unsigned char. It represents an 8bit unsigned integer(0. to 255) and represents raw pixel channel data returned by image loading
+            stbi_uc *pixels = stbi_load("textures/texture.jpg", &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+            vk::DeviceSize imageSize = texWidth * texHeight * 4; //pixels are laid out row by row with 4 bytes per pixel in the case of STBI_rgb_alpha
+
+            if(!pixels){
+                throw std::runtime_error("failed to load texture image!");
+            }
+            //The buffer should be in host visible memory (eHostVisible) so that we can map it. It should also be host coherent (eHostCoherent), to ensure the data written to it is immediately available (and not cached in some way). And it should be usable as a transfer source ('eTransferSrc') so that we can copy it to an image later on: The automatically typed return values are a vk::raii::Buffer and a vk::raii::DeviceMemory, respectively.
+            auto[stagingBuffer, stagingBufferMemory] = createBuffer(imageSize, vk::BufferUsageFlagBits::eTransferSrc, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+
+            //copy pixel values to the buffer
+            void* data = stagingBufferMemory.mapMemory(0, imageSize);
+            memcpy(data, pixels, imageSize);
+            stagingBufferMemory.unmapMemory();
+
+            stbi_image_free(pixels);
+
+            std::tie(textureImage, textureImageMemory) = createImage(texWidth,
+                                                           texHeight,
+                                                           vk::Format::eR8G8B8A8Srgb,
+                                                           vk::ImageTiling::eOptimal,
+                                                           vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+                                                           vk::MemoryPropertyFlagBits::eDeviceLocal);
+            
+            /*
+             The next step is to copy the staging buffer to the texture image. This involves two steps:
+                Transition the texture image to vk::ImageLayout::eTransferDstOptimal
+                Execute the buffer to image copy operation
+
+
+            */
+
+            vk::raii::CommandBuffer commandBuffer = beginSingleTimeCommands();
+            //The image was created with the vk::ImageLayout::eUndefined layout, so that one should be specified as old layout when transitioning textureImage. Remember that we can do this because we don’t care about its contents before performing the copy operation.
+            transitionImageLayout(commandBuffer, textureImage, vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal);
+            copyBufferToImage(commandBuffer, stagingBuffer, textureImage, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight));
+            
+            //To be able to start sampling from the texture image in the shader, we need one last transition to prepare it for shader access. 
+            transitionImageLayout(commandBuffer, textureImage, vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal);
+            
+            endSingleTimeCommands(std::move(commandBuffer));
+
+        }
+
+        void transitionImageLayout(vk::raii::CommandBuffer &commandBuffer, const vk::raii::Image &image, vk::ImageLayout oldLayout, vk::ImageLayout newLayout){
+            
+            /*
+                oldLayout and newLayout specify the the layout transition. It is possible to use vk::ImageLayout::eUndefined as oldLayout if you don’t care about the existing contents of the image.
+                If you are using the barrier to transfer queue family ownership, then srcQueueFamilyIndex and dstQueueFamilyIndex fields should be the indices of the queue families. They must be set to vk::QueueFamilyIgnored if you don’t want to do this (not the default value!).
+                The image and subresourceRange specify the image that is affected and the specific part of the image. Our image is not an array and does not have mipmapping levels, so only one level and layer are specified.
+
+
+            */
+            vk::ImageMemoryBarrier barrier{
+                .oldLayout = oldLayout,
+                .newLayout = newLayout,
+                .srcQueueFamilyIndex = vk::QueueFamilyIgnored,
+                .dstQueueFamilyIndex = vk::QueueFamilyIgnored,
+                .image = image,
+                .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor, .levelCount = 1, .layerCount = 1}
+            };
+
+            vk::PipelineStageFlags sourceStage;
+            vk::PipelineStageFlags destinationStage;
+
+            //transfer writes must occur in the pipeline transfer stage. Since the writings don’t have to wait on anything, you may specify an empty access mask and the earliest possible pipeline stage vk::PipelineStageFlagBits::eTopOfPipe for the pre-barrier operations. 
+            //It should be noted that vk::PipelineStageFlagBits::eTransfer is not a real stage within the graphics and compute pipelines. It is more of a pseudo-stage where transfers happen.
+            //See https://docs.vulkan.org/spec/latest/chapters/synchronization.html#VkPipelineStageFlagBits
+            if(oldLayout == vk::ImageLayout::eUndefined && newLayout == vk::ImageLayout::eTransferDstOptimal){
+                barrier.srcAccessMask = {};
+                barrier.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
+
+                sourceStage = vk::PipelineStageFlagBits::eTopOfPipe;
+                destinationStage = vk::PipelineStageFlagBits::eTransfer;
+            }
+            //The image will be written in the same pipeline stage and subsequently read by the fragment shader, which is why we specify shader reading access in the fragment shader pipeline stage.
+            else if(oldLayout == vk::ImageLayout::eTransferDstOptimal && newLayout == vk::ImageLayout::eShaderReadOnlyOptimal){
+                barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+                barrier.dstAccessMask = vk::AccessFlagBits::eShaderRead;
+
+                sourceStage = vk::PipelineStageFlagBits::eTransfer;
+                destinationStage = vk::PipelineStageFlagBits::eFragmentShader;
+            }
+            else {
+                throw std::invalid_argument("unsupported layout transition!");
+            }
+
+
+            /*
+                All types of pipeline barriers are submitted using the same function. The first parameter specifies in which pipeline stage the operations occur that should happen before the barrier. 
+                The second parameter specifies the pipeline stage in which operations will wait on the barrier. The pipeline stages that you are allowed to specify before and after the barrier depend on how you use the resource before and after the barrier.
+                The third parameter is either {} or vk::DependencyFlagBits::eByRegion. The latter turns the barrier into a per-region condition. That means that the implementation is allowed to already begin reading from the parts of a resource that were written so far, for example.
+                The last three parameters reference arrays of pipeline barriers of the three available types: memory barriers, buffer memory barriers, and image memory barriers like the one we’re using here.
+            */
+            commandBuffer.pipelineBarrier(sourceStage, destinationStage, {}, {}, nullptr, barrier);
+
+        }
+
+        void copyBufferToImage(vk::raii::CommandBuffer &commandBuffer, const vk::raii::Buffer &buffer, vk::raii::Image &image, uint32_t width, uint32_t height){
+            
+            //The imageSubresource, imageOffset and imageExtent fields indicate to which part of the image we want to copy the pixels.
+            vk::BufferImageCopy region{.bufferOffset = 0,
+                                        .bufferRowLength =0,
+                                        .bufferImageHeight = 0,
+                                        .imageSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
+                                        .imageOffset = {0, 0, 0},
+                                        .imageExtent = {width, height, 1}};
+            //The third parameter indicates which layout the image is currently using. I’m assuming here that the image has already been transitioned to the layout that is optimal for copying pixels to.
+            commandBuffer.copyBufferToImage(buffer, image, vk::ImageLayout::eTransferDstOptimal, region);
+        }
+
+        vk::raii::ImageView createImageView(vk::Image const &image, vk::Format format)
+        {
+            //left out .components initialization, because it is default initialized to vk::ComponentSwizzle::eIdentity anyway.
+            //The components field allows you to swizzle the color channels around. For example, you can map all the channels to the red channel for a monochrome texture. You can also map constant values of 0 and 1 to a channel. 
+            vk::ImageViewCreateInfo viewInfo{
+                .image            = image,
+                .viewType         = vk::ImageViewType::e2D,
+                .format           = format,
+                .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1}};
+            return vk::raii::ImageView(device, viewInfo);
+        }
+
+        void createTextureImageView(){
+            textureImageView = createImageView(*textureImage, vk::Format::eR8G8B8A8Srgb);
+        }
+
+        void createTextureSampler(){
+            /*
+                The magFilter and minFilter fields specify how to interpolate texels that are magnified or minified. Magnification concerns the oversampling problem describes above, and minification concerns undersampling. 
+                The choices are vk::Filter::eNearest and vk::Filter::eLinear. They both relate to oversampling(more fragments than texels) and vk::Filter::eNearest involves taking the closest texel for the texture coordinate in each fragment(pixelated result like a minecraft painting), while
+                vk::Filter::eLinear involves combininbg the 4 closest texels through linear interpolation(smoother result)
+
+                The addressing mode can be specified per axis using the addressMode fields. The available values are listed below. Most of these are demonstrated in the image above. Note that the axes are called U, V and W instead of X, Y and Z. This is a convention for texture space coordinates.
+
+                    vk::SamplerAddressMode::eRepeat: Repeat the texture when going beyond the image dimensions.
+                    vk::SamplerAddressMode::eMirroredRepeat: Like repeat, but inverts the coordinates to mirror the image when going beyond the dimensions.
+                    vk::SamplerAddressMode::eClampToEdge: Take the color of the edge closest to the coordinate beyond the image dimensions.
+                    vk::SamplerAddressMode::eMirrorClampToEdge: Like clamp to edge, but instead uses the edge opposite to the closest edge.
+                    vk::SamplerAddressMode::eClampToBorder: Return a solid color when sampling beyond the dimensions of the image.
+                
+                It doesn’t really matter which addressing mode we use here, because we’re not going to sample outside of the image, FOR NOW!
+
+                The anisotropyEnable field specifies if anisotropic filtering should be used. There is no reason not to use this unless performance is a concern. The maxAnisotropy field limits the number of texel samples that can be used to calculate the final color. A lower value results in better performance, but lower quality results. 
+            */
+
+            vk::PhysicalDeviceProperties properties = physicalDevice.getProperties();
+            vk::SamplerCreateInfo samplerInfo{.magFilter = vk::Filter::eLinear,
+                                              .minFilter = vk::Filter::eLinear,
+                                              .mipmapMode = vk::SamplerMipmapMode::eLinear,
+                                              .addressModeU = vk::SamplerAddressMode::eRepeat,
+                                              .addressModeV = vk::SamplerAddressMode::eRepeat,
+                                              .addressModeW = vk::SamplerAddressMode::eRepeat,
+                                              .anisotropyEnable = true,
+                                              .maxAnisotropy = properties.limits.maxSamplerAnisotropy};
+            
+            //just for future reference of properties available to the struct
+            //This field specifies which color is returned when sampling beyond image with clamp to border addressing mode.
+            samplerInfo.borderColor = vk::BorderColor::eIntOpaqueBlack;
+            //This field specifies which coordinates systems we want to use to address texels in an image. if this field is vk::True, then we can simply use coordinates within [0, texWidht) and [0, texHeight) range.
+            //if it is false, then the texels are addressed using the [0, 1) range on all axes.
+            samplerInfo.unnormalizedCoordinates = vk::False;
+
+            //If a comparison function is enabled, then texels will first be compared to a value, and the result of that comparison is used in filtering operations. This is mainly used for percentage-closer filtering on shadow maps.
+            samplerInfo.compareEnable = vk::False;
+            samplerInfo.compareOp = vk::CompareOp::eAlways;
+            samplerInfo.mipLodBias = 0.0f;
+            samplerInfo.minLod = 0.0f;
+            samplerInfo.maxLod = 0.0f;
+
+
+            textureSampler = vk::raii::Sampler(device, samplerInfo);
+        }
+
         //The typeFilter parameter will be used to specify the bit field of memory types that are suitable. That means that we can find the index of a suitable memory type by simply iterating over them and checking if the corresponding bit is set to 1.
         uint32_t findMemoryType(uint32_t typeFilter, vk::MemoryPropertyFlags properties){
             vk::PhysicalDeviceMemoryProperties memProperties = physicalDevice.getMemoryProperties();
@@ -788,27 +1079,36 @@ class Window{
         
         //we take reference instead of copies
         void copyBuffer(vk::raii::Buffer & srcBuffer, vk::raii::Buffer & dstBuffer, vk::DeviceSize size){
-            vk::CommandBufferAllocateInfo allocInfo{.commandPool = commandPool, .level = vk::CommandBufferLevel::ePrimary, .commandBufferCount = 1};
-            vk::raii::CommandBuffer commandCopyBuffer = std::move(device.allocateCommandBuffers(allocInfo).front()); //extracting the first commandbuffer
+            vk::raii::CommandBuffer commandCopyBuffer = beginSingleTimeCommands();
 
             //We’re only going to use the command buffer once and wait with returning from the function until the copy operation has finished executing. It’s good practice to tell the driver about our intent using vk::CommandBufferUsageFlagBits::eOneTimeSubmit.
-            commandCopyBuffer.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
             
             //Contents of buffers are transferred using the vk:raii::CommandBuffer::copyBuffer command. It takes the source and destination buffers as arguments, and an array of regions to copy. 
             //The regions are defined in vk::BufferCopy structs and consist of a source buffer offset, destination buffer offset and size. It is not possible to specify vk::WholeSize here, unlike the vk::raii::DeviceMemory::mapMemory command.
-            commandCopyBuffer.copyBuffer(*srcBuffer, *dstBuffer, vk::BufferCopy(0, 0, size));
+            commandCopyBuffer.copyBuffer(*srcBuffer, *dstBuffer, vk::BufferCopy{.size = size});
+            endSingleTimeCommands(std::move(commandCopyBuffer));
+        }
 
-            commandCopyBuffer.end();//since the cb only contains the copy command
-            queue.submit(vk::SubmitInfo{.commandBufferCount = 1, .pCommandBuffers = &*commandCopyBuffer}, nullptr);
-            
-            /*
-                There are again two possible ways to wait on this transfer to complete. We could use a fence and wait with vk::raii::Device::waitForFences, 
-                or simply wait for the transfer queue to become idle with vk::raii::Queue::waitIdle. 
-                A fence would allow you to schedule multiple transfers simultaneously and wait for all of them complete, instead of executing one at a time. T
-                hat may give the driver more opportunities to optimize.
-            */
+        vk::raii::CommandBuffer beginSingleTimeCommands(){
+            vk::CommandBufferAllocateInfo allocInfo{.commandPool = commandPool, .level = vk::CommandBufferLevel::ePrimary, .commandBufferCount = 1};
+            vk::raii::CommandBuffer commandBuffer = std::move(vk::raii::CommandBuffers(device, allocInfo).front());
+            vk::CommandBufferBeginInfo beginInfo{.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit};
+            commandBuffer.begin(beginInfo);
+
+            return std::move(commandBuffer);
+        }
+
+        //&& means rvalue reference. This function expects a temporary/ movable CommandBuffer object.
+        void endSingleTimeCommands(vk::raii::CommandBuffer &&commandBuffer)
+        {
+            commandBuffer.end();
+
+            //&*commandBuffer combines * ->dereference and &-> take the address. Read as Get the object that commandBuffer points/refers to, then get its address.
+            //but commandBuffer is a reference to vk::raii::CommandBuffer object, NOT a traditional pointer
+            //
+            vk::SubmitInfo submitInfo{.commandBufferCount = 1, .pCommandBuffers = &*commandBuffer};
+            queue.submit(submitInfo, nullptr);
             queue.waitIdle();
-
         }
 
         std::pair<vk::raii::Buffer, vk::raii::DeviceMemory> createBuffer(vk::DeviceSize size, vk::BufferUsageFlags usage, vk::MemoryPropertyFlags properties){
@@ -932,9 +1232,14 @@ class Window{
         }
 
         void createDescriptorPool(){
-            vk::DescriptorPoolSize poolSize{.type = vk::DescriptorType::eUniformBuffer, .descriptorCount = MAX_FRAMES_IN_FLIGHT};
+            std::array<vk::DescriptorPoolSize, 2> poolSize{{{.type = vk::DescriptorType::eUniformBuffer, .descriptorCount = MAX_FRAMES_IN_FLIGHT},
+                                                {.type = vk::DescriptorType::eCombinedImageSampler, .descriptorCount = MAX_FRAMES_IN_FLIGHT}}};
+
             //The structure has an optional flag similar to command pools that determines if individual descriptor sets can be freed or not. As the vk::raii::DescriptorSets destroy the underlying vk::DescriptorSet on destruction we need to set it to vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet to allow that.
-            vk::DescriptorPoolCreateInfo poolInfo{.flags = vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet, .maxSets = MAX_FRAMES_IN_FLIGHT, .poolSizeCount = 1, .pPoolSizes = &poolSize};
+            vk::DescriptorPoolCreateInfo          poolInfo{.flags         = vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet,
+                                                        .maxSets       = MAX_FRAMES_IN_FLIGHT,
+                                                        .poolSizeCount = static_cast<uint32_t>(poolSize.size()),
+                                                        .pPoolSizes    = poolSize.data()};
 
             descriptorPool =vk::raii::DescriptorPool(device, poolInfo);
         }
@@ -953,21 +1258,29 @@ class Window{
             //Descriptors that refer to buffers, like our uniform buffer descriptor, are configured with a vk::DescriptorBufferInfo struct. This structure specifies the buffer and the region within it that contains the data for the descriptor.
             for(size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++){
                 vk::DescriptorBufferInfo bufferInfo{.buffer = uniformBuffers[i], .offset = 0, .range = sizeof(UniformBufferObject)};
+                //The resources for a combined image sampler structure must be specified in a vk::DescriptorImageInfo struct, just like the buffer resource for a uniform buffer descriptor is specified in a vk::DescriptorBufferInfo struct
+                vk::DescriptorImageInfo  imageInfo{.sampler = textureSampler, .imageView = textureImageView, .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal};
                 /*
                     The first two fields specify the descriptor set to update and the binding. We gave our uniform buffer binding index 0. Remember that descriptors can be arrays, so we also need to specify the first index in the array that we want to update. 
                     We’re not using an array, so the index is simply 0. We need to specify the type of descriptor again. It’s possible to update multiple descriptors at once in an array, starting at index dstArrayElement. 
                     The descriptorCount field specifies how many array elements you want to update. The last field references an array with descriptorCount structs that actually configure the descriptors. 
                     It depends on the type of descriptor which one of the three you actually need to use. The pBufferInfo field is used for descriptors that refer to buffer data. There are additional elements in this struct, that are not used in this sample: pImageInfo is used for descriptors that refer to image data, and pTexelBufferView is used for descriptors that refer to buffer views. Our descriptor is based on buffers, so we’re just using pBufferInfo.
                 */
-                vk::WriteDescriptorSet descriptorWrite{.dstSet = descriptorSets[i],
-                                                       .dstBinding = 0,
-                                                       .dstArrayElement = 0,
-                                                       .descriptorCount = 1,
-                                                       .descriptorType = vk::DescriptorType::eUniformBuffer,
-                                                       .pBufferInfo = &bufferInfo};
+                std::array<vk::WriteDescriptorSet, 2> descriptorWrites{{{.dstSet          = descriptorSets[i],
+                                                                        .dstBinding      = 0,
+                                                                        .dstArrayElement = 0,
+                                                                        .descriptorCount = 1,
+                                                                        .descriptorType  = vk::DescriptorType::eUniformBuffer,
+                                                                        .pBufferInfo     = &bufferInfo},
+                                                                        {.dstSet          = descriptorSets[i],
+                                                                        .dstBinding      = 1,
+                                                                        .dstArrayElement = 0,
+                                                                        .descriptorCount = 1,
+                                                                        .descriptorType  = vk::DescriptorType::eCombinedImageSampler,
+                                                                        .pImageInfo      = &imageInfo}}};
                 //The updates are applied using vk::raii::Device::updateDescriptorSets. It accepts two arrays as parameters: an array of vk::WriteDescriptorSet and an array of vk::CopyDescriptorSet. 
                 //The latter can be used to copy descriptors to each other, as its name implies.
-                device.updateDescriptorSets(descriptorWrite, {});
+                device.updateDescriptorSets(descriptorWrites, {});
             }
         }
 
@@ -1157,14 +1470,13 @@ class Window{
             //links several feature structures through their pNext pointers.
             //C++ template type. The names inside <...> are types that tell vk::StructureChain which Vulkan structures to hold and in what order
             //vk::StructureChain<...> holds one object of each listed type and connects their pNext pointers automatically.
+            //anisotropic filtering is actually an optional device feature. We need to update the createLogicalDevice function to request it:
             vk::StructureChain<vk::PhysicalDeviceFeatures2,
-		                   vk::PhysicalDeviceVulkan11Features,
 		                   vk::PhysicalDeviceVulkan13Features,
 		                   vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>
 		    featureChain = {
-		        {},                                    // vk::PhysicalDeviceFeatures2
-		        {.shaderDrawParameters = true},        // vk::PhysicalDeviceVulkan11Features
-		        {.dynamicRendering = true},            // vk::PhysicalDeviceVulkan13Features
+		        {.features = {.samplerAnisotropy = true }}, // vk::PhysicalDeviceFeatures2
+                {.synchronization2 = true, .dynamicRendering = true }, // vk::PhysicalDeviceVulkan13Features                                  
 		        {.extendedDynamicState = true}         // vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT
 		    };
 
