@@ -2,7 +2,7 @@
 //The inPosition and inColor variables are vertex attributes. 
 //They’re properties that are specified per-vertex in the vertex buffer 
 struct VSInput {
-    float2 inPosition;
+    float3 inPosition;
     float3 inColor;
     float2 inTexCoord;
 }
@@ -30,7 +30,7 @@ Sampler2D texture;
 VSOutput vertMain(VSInput input) {
     VSOutput output;
     //this is actually multiplying position by model matrix first, then view, then projections
-    output.pos = mul(ubo.proj, mul(ubo.view, mul(ubo.model, float4(input.inPosition, 0.0, 1.0))));
+    output.pos = mul(ubo.proj, mul(ubo.view, mul(ubo.model, float4(input.inPosition, 1.0))));
     output.fragColor = input.inColor;
     output.fragTexCoord = input.inTexCoord;
     return output;
