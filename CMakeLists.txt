@@ -25,7 +25,7 @@ find_package (Vulkan 1.4.335 REQUIRED)      # Require Vulkan SDK version 1.4.335
 find_package(Stb REQUIRED)
 target_include_directories(Tizon PRIVATE "${Stb_INCLUDE_DIR}")
 target_link_libraries(Tizon PRIVATE glfw Vulkan::Vulkan)
-#find_package (tinyobjloader REQUIRED)
+find_package (tinyobjloader REQUIRED)
 #find_package (tinygltf REQUIRED)
 #find_package (KTX REQUIRED)
 
