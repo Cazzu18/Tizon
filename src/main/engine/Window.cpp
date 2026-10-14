@@ -343,6 +343,58 @@
 */
 
 /*
+    Generating Mipmaps:
+        Mipmaps are precalculated, DOWNSCALED versions of an image. Each new image is half the width and height of the previous one.
+        They are widely used as a form of LEVEL of Detail or LOD. Objects that are far away from the camera WILL SAMPLE Textures from the SMALLER Mip images.
+        Using smaller images increases the rendering speed and avoids artifacts such as the Moire pattern
+
+        Moire patterns: 
+            large scale wave interference pattern that can be produced when a partially opaque ruled pattern with transparent gaps is overload on another similar pattern
+            For the moiré interference pattern to appear, the two patterns must not be completely identical, but rather displaced, rotated, or have slightly different pitch.
+
+            In Vulkan, each of the mip images is stored in different mip levels of a vk::Image. Mip level 0 is the original image, and the mip levels after level 0 are commonly referred to as the mip chain.
+            The number of mip levels is specified when the vk::Image is created.
+            We need to calculate the number of mip levels from the dimensions of the image.
+
+        Previously, createTextureImage called beginSingleTimeCommands and endSingleTimeCommands three separate times: once around the layout transition, once around the buffer-to-image copy, and once around the final transition to shader-read layout. 
+        Generating mipmaps adds a blit and two more layout transitions for every mip level, and opening a new command buffer for each of those would be wasteful. So instead, createTextureImage will call beginSingleTimeCommands once at the start, record the transition, the copy, and all of generateMipmaps into that same command buffer, and only call endSingleTimeCommands once, at the very end.
+
+        t is very convenient to use a built-in function like vk::raii::CommandBuffer::blitImage to generate all the mip levels, but unfortunately it is not guaranteed to be supported on all platforms. It requires the texture image format we use to support linear filtering, which can be checked with the vk::raii::PhysicalDevice::getFormatProperties function. 
+        We will add a check to the generateMipmaps function for this.
+
+        While the vk::raii::Image holds the mipmap data, vk::raii::Sampler controls how that data is read while rendering. Vulkan allows us to specify minLod, maxLod, mipLodBias, and mipmapMode ("Lod" means "Level of Detail"). 
+        When a texture is sampled, the sampler selects a mip level according to the following PSUEDOCODE:
+
+            lod = getLodLevelFromScreenSize(); //Lod is "Level of Detail" smaller when the object is close, may be negative
+            lod = clamp(lod + mipLodBias, minLod, maxLod);
+
+            level = clamp(floor(lod), 0, texture.mipLevels - 1);  //clamped to the number of mip levels in the texture
+
+            if (mipmapMode == vk::SamplerMipmapMode::eNearest)
+            {
+                color = sample(level);
+            }
+            else
+            {
+                color = blend(sample(level), sample(level + 1));
+            }
+            If samplerInfo.mipmapMode is vk::SamplerMipmapMode::eNearest, lod selects the mip level to sample from. If the mipmap mode is vk::SamplerMipmapMode::eLinear, lod is used to select two mip levels to be sampled. Those levels are sampled and the results are linearly blended.
+
+            The sample operation is also affected by lod:
+
+            if (lod <= 0)
+            {
+                color = readTexture(uv, magFilter);
+            }
+            else
+            {
+                color = readTexture(uv, minFilter);
+            }
+            If the object is close to the camera, magFilter is used as the filter. If the object is further from the camera, minFilter is used. Normally, lod is non-negative, and is only 0 when close the camera. mipLodBias lets us force Vulkan to use lower lod and level than it would normally use.
+
+*/          
+
+/*
     readFile function will read all the bytes from the specified file and return them in a byte array managed by std::vector. 
     We start by opening the file with two flags:
         ate: Start reading at the end of the file
@@ -463,8 +515,8 @@ static std::vector<char> readFile(const std::string& filename){
 //constexpr specified a variable, function, or constructor can be evaluated at compile time
 constexpr uint32_t WIDTH = 800;
 constexpr uint32_t HEIGHT = 600;
-const std::string TEXTURE_PATH = "textures/sugarcube_corner.png";
-const std::string MODEL_PATH = "models/Sugarcube_Corner.obj";
+const std::string TEXTURE_PATH = "textures/viking_room.png";
+const std::string MODEL_PATH = "models/viking_room.obj";
 
 //Desfining how many frames should be processed concurrently. That is, allow the rendering of one frame to not interfere with the recording of the next
 //we choose 2 because although we have 3 images, we don't want the CPU to get too dar ahead of the GPU
@@ -522,6 +574,7 @@ class Window{
         std::vector<vk::raii::DescriptorSet> descriptorSets;
 
         //texture mapping
+        uint32_t mipLevels = 0;
         vk::raii::Image textureImage = nullptr;
         vk::raii::DeviceMemory textureImageMemory = nullptr;
         vk::raii::ImageView textureImageView = nullptr; //images are accessed via imageviews
@@ -735,7 +788,7 @@ class Window{
             swapChainImageViews.reserve(swapChainImages.size());
             for ( auto &image: swapChainImages )
             {
-                swapChainImageViews.emplace_back(createImageView(image, swapChainSurfaceFormat.format, vk::ImageAspectFlagBits::eColor));
+                swapChainImageViews.emplace_back(createImageView(image, swapChainSurfaceFormat.format, vk::ImageAspectFlagBits::eColor, 1));
             }
             
         }
@@ -963,7 +1016,7 @@ class Window{
             commandPool = vk::raii::CommandPool(device, poolInfo);
         }
 
-        std::pair<vk::raii::Image, vk::raii::DeviceMemory> createImage(uint32_t width, uint32_t height, vk::Format format, vk::ImageTiling tiling, vk::ImageUsageFlags usage, vk::MemoryPropertyFlags properties){
+        std::pair<vk::raii::Image, vk::raii::DeviceMemory> createImage(uint32_t width, uint32_t height, uint32_t mipLevels, vk::Format format, vk::ImageTiling tiling, vk::ImageUsageFlags usage, vk::MemoryPropertyFlags properties){
             //Although we could set up the shader to access the pixel values in the buffer, it’s better to use image objects in Vulkan for this purpose. Image objects will make it easier and faster to retrieve colors by allowing us to use 2D coordinates, for one. 
             //pixels within an image object are known as texels
 
@@ -990,7 +1043,7 @@ class Window{
             vk::ImageCreateInfo imageInfo{.imageType = vk::ImageType::e2D,
                                             .format = format,
                                             .extent = {width, height, 1},
-                                            .mipLevels = 1,
+                                            .mipLevels = mipLevels,
                                             .arrayLayers = 1,
                                             .samples = vk::SampleCountFlagBits::e1,
                                             .tiling = tiling,
@@ -1007,6 +1060,89 @@ class Window{
             return {std::move(image), std::move(imageMemory)};
         }
 
+        //There are two alternatives in this case. I could implement a function that searches common texture image formats for one that does support linear blitting, or I could implement the mipmap generation in software with a library like stb_image_resize. Each mip level can then be loaded into the image in the same way that we loaded the original image.
+        //TODO: It should be noted that it is uncommon in practice to generate the mipmap levels at runtime anyway. Usually they are pre-generated and stored in the texture file alongside the base level to improve loading speed. 
+        void generateMipmaps(vk::raii::CommandBuffer &commandBuffer, vk::raii::Image &image, vk::Format imageFormat, int32_t texWidth, int32_t texHeight, uint32_t mipLevels){
+            
+            //The vk::FormatProperties struct has three fields named linearTilingFeatures, optimalTilingFeatures and bufferFeatures that each describe how the format can be used depending on the way it is used. We create a texture image with the optimal tiling format, so we need to check optimalTilingFeatures. 
+            //Support for the linear filtering feature can be checked with the vk::FormatFeatureFlagBits::eSampledImageFilterLinear:
+            vk::FormatProperties formatProperties = physicalDevice.getFormatProperties(imageFormat);
+            
+            if(!(formatProperties.optimalTilingFeatures & vk::FormatFeatureFlagBits::eSampledImageFilterLinear)){
+                throw std::runtime_error("texture image format does not support linear blitting!");
+            }
+
+            vk::ImageMemoryBarrier barrier = {
+                .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+                .dstAccessMask = vk::AccessFlagBits::eTransferRead,
+                .oldLayout = vk::ImageLayout::eTransferDstOptimal,
+                .newLayout = vk::ImageLayout::eTransferSrcOptimal,
+                .srcQueueFamilyIndex = vk::QueueFamilyIgnored,
+                .dstQueueFamilyIndex = vk::QueueFamilyIgnored,
+                .image = image,
+                .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor, .levelCount = 1, .layerCount = 1}
+            };
+
+            //We’re going to make several transitions, so we’ll reuse this vk::ImageMemoryBarrier. The fields set above will remain the same for all barriers. subresourceRange.miplevel, oldLayout, newLayout, srcAccessMask, and dstAccessMask will be changed for each transition.
+
+            int32_t mipWidth = texWidth;
+            int32_t mipHeight = texHeight;
+
+            for(uint32_t i = 1; i < mipLevels; i++){
+                
+                //First, we transition level i - 1 to vk::ImageLayout::eTransferSrcOptimal. This transition will wait for level i - 1 to be filled, either from the previous blit command, or from vk::raii::CommandBuffer::copyBufferToImage. The current blit command will wait on this transition.
+                barrier.subresourceRange.baseMipLevel = i - 1;
+                barrier.oldLayout                     = vk::ImageLayout::eTransferDstOptimal;
+                barrier.newLayout                     = vk::ImageLayout::eTransferSrcOptimal;
+                barrier.srcAccessMask                 = vk::AccessFlagBits::eTransferWrite;
+                barrier.dstAccessMask                 = vk::AccessFlagBits::eTransferRead;
+
+                commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, barrier);
+
+                /*
+                    Next, we specify the regions that will be used in the blit operation. The source mip level is i - 1 and the destination mip level is i. The two elements of the srcOffsets array determine the 3D region that data will be blitted from. dstOffsets determines the region that data will be blitted to. 
+                    The X and Y dimensions of the dstOffsets[1] are divided by two since each mip level is half the size of the previous level. The Z dimension of srcOffsets[1] and dstOffsets[1] must be 1, since a 2D image has a depth of 1.
+                */
+                vk::ImageBlit blit = {.srcSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor, .mipLevel = i - 1, .layerCount = 1},
+                      .srcOffsets     = std::array<vk::Offset3D, 2>({{}, {mipWidth, mipHeight, 1}}),
+                      .dstSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor, .mipLevel = i, .layerCount = 1},
+                      .dstOffsets     = std::array<vk::Offset3D, 2>({{}, {1 < mipWidth ? mipWidth / 2 : 1, 1 < mipHeight ? mipHeight / 2 : 1, 1}})};
+                
+                //Now, we record the blit command. Note that image is used for both the srcImage and dstImage parameter. This is because we’re blitting between different levels of the same image. The source mip level was just transitioned to vk::ImageLayout::eTransferSrcOptimal and the destination level is still in vk::ImageLayout::eTransferDstOptimal from createTextureImage.
+                //Beware if you are using a dedicated transfer queue (as suggested in Vertex buffers): vk::raii::CommandBuffer::blitImage must be submitted to a queue with graphics capability.
+                //The last parameter allows us to specify a vk::Filter to use in the blit. We have the same filtering options here that we had when making the vk::raii::Sampler. We use the vk::Filter::eLinear to enable interpolation.
+                commandBuffer.blitImage(image, vk::ImageLayout::eTransferSrcOptimal, image, vk::ImageLayout::eTransferDstOptimal, blit, vk::Filter::eLinear);
+                
+                //This barrier transitions mip level i - 1 to vk::ImageLayout::eShaderReadOnlyOptimal. This transition waits on the current blit command to finish. All sampling operations will wait on this transition to finish.
+                barrier.oldLayout     = vk::ImageLayout::eTransferSrcOptimal;
+                barrier.newLayout     = vk::ImageLayout::eShaderReadOnlyOptimal;
+                barrier.srcAccessMask = vk::AccessFlagBits::eTransferRead;
+                barrier.dstAccessMask = vk::AccessFlagBits::eShaderRead;
+
+                commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eFragmentShader, {}, {}, {}, barrier);
+                
+                //we divide the current mip dimensions by two. We check each dimension before the division to ensure that dimension never becomes 0. This handles cases where the image is not square, since one of the mip dimensions would reach 1 before the other dimension. When this happens, that dimension should remain 1 for all remaining levels.
+                if (1 < mipWidth)
+                {
+                    mipWidth /= 2;
+                }
+                if (1 < mipHeight)
+                {
+                    mipHeight /= 2;
+                }
+
+            }
+
+            //This barrier transitions the last mip level from vk::ImageLayout::eTransferDstOptimal to vk::ImageLayout::eShaderReadOnlyOptimal. The loop didn’t handle this, since the last mip level is never blitted from
+            barrier.subresourceRange.baseMipLevel = mipLevels - 1;
+            barrier.oldLayout                     = vk::ImageLayout::eTransferDstOptimal;
+            barrier.newLayout                     = vk::ImageLayout::eShaderReadOnlyOptimal;
+            barrier.srcAccessMask                 = vk::AccessFlagBits::eTransferWrite;
+            barrier.dstAccessMask                 = vk::AccessFlagBits::eShaderRead;
+
+            commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eFragmentShader, {}, {}, {}, barrier);
+        }
+
         void createTextureImage(){
             int texWidth, texHeight, texChannels;
 
@@ -1015,6 +1151,10 @@ class Window{
             //stbi_uc is a C typedef in stb_image.h defined as an unsigned char. It represents an 8bit unsigned integer(0. to 255) and represents raw pixel channel data returned by image loading
             stbi_uc *pixels = stbi_load(TEXTURE_PATH.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
             vk::DeviceSize imageSize = texWidth * texHeight * 4; //pixels are laid out row by row with 4 bytes per pixel in the case of STBI_rgb_alpha
+
+            //This calculates the number of levels in the mip chain. The max function selects the largest dimension. The log2 function calculates how many times that dimension can be divided by 2. The floor function handles cases where the largest dimension is not a power of 2. 1 is added so that the original image has a mip level.
+            //log base 2 represents how many times a number can be divided by 2 before reaching 1. More precisely, it calculates the number of times you must divide a number by 2 to get exactly 1, though this only results in a clean whole number if your starting point is a perfect power of 2.
+            mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(texWidth, texHeight)))) + 1;
 
             if(!pixels){
                 throw std::runtime_error("failed to load texture image!");
@@ -1029,11 +1169,13 @@ class Window{
 
             stbi_image_free(pixels);
 
+            //added eTransferSrc because vk::raii::CommandBuffer::blitImage(mip mapping) is considered a transfer operation, so we must inform Vulkan that we intend to use the texture image as both the source and destination of a transfer.
             std::tie(textureImage, textureImageMemory) = createImage(texWidth,
                                                            texHeight,
+                                                           mipLevels,
                                                            vk::Format::eR8G8B8A8Srgb,
                                                            vk::ImageTiling::eOptimal,
-                                                           vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+                                                           vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
                                                            vk::MemoryPropertyFlagBits::eDeviceLocal);
             
             /*
@@ -1046,17 +1188,23 @@ class Window{
 
             vk::raii::CommandBuffer commandBuffer = beginSingleTimeCommands();
             //The image was created with the vk::ImageLayout::eUndefined layout, so that one should be specified as old layout when transitioning textureImage. Remember that we can do this because we don’t care about its contents before performing the copy operation.
-            transitionImageLayout(commandBuffer, textureImage, vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal);
+            transitionImageLayout(commandBuffer, textureImage, vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal, mipLevels);
             copyBufferToImage(commandBuffer, stagingBuffer, textureImage, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight));
             
+            /*
+                Like other image operations, vk::raii::CommandBuffer::blitImage depends on the layout of the image it operates on. We could transition the entire image to vk::ImageLayout::eGeneral, but this will most likely be slow. 
+                For optimal performance, the source image should be in vk::ImageLayout::eTransferSrcOptimal and the destination image should be in vk::ImageLayout::eTransferDstOptimal. Vulkan allows us to transition each mip level of an image independently. 
+                Each blit will only deal with two mip levels at a time, so we can transition each level into the optimal layout between blits commands.
+            */
             //To be able to start sampling from the texture image in the shader, we need one last transition to prepare it for shader access. 
-            transitionImageLayout(commandBuffer, textureImage, vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal);
+            //transitionImageLayout(commandBuffer, textureImage, vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal);
+            generateMipmaps(commandBuffer, textureImage, vk::Format::eR8G8B8A8Srgb, texWidth, texHeight, mipLevels);
             
             endSingleTimeCommands(std::move(commandBuffer));
 
         }
 
-        void transitionImageLayout(vk::raii::CommandBuffer &commandBuffer, const vk::raii::Image &image, vk::ImageLayout oldLayout, vk::ImageLayout newLayout){
+        void transitionImageLayout(vk::raii::CommandBuffer &commandBuffer, const vk::raii::Image &image, vk::ImageLayout oldLayout, vk::ImageLayout newLayout, uint32_t mipLevels){
             
             /*
                 oldLayout and newLayout specify the the layout transition. It is possible to use vk::ImageLayout::eUndefined as oldLayout if you don’t care about the existing contents of the image.
@@ -1071,7 +1219,7 @@ class Window{
                 .srcQueueFamilyIndex = vk::QueueFamilyIgnored,
                 .dstQueueFamilyIndex = vk::QueueFamilyIgnored,
                 .image = image,
-                .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor, .levelCount = 1, .layerCount = 1}
+                .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor, .levelCount = mipLevels, .layerCount = 1}
             };
 
             vk::PipelineStageFlags sourceStage;
@@ -1123,7 +1271,7 @@ class Window{
             commandBuffer.copyBufferToImage(buffer, image, vk::ImageLayout::eTransferDstOptimal, region);
         }
 
-        vk::raii::ImageView createImageView(vk::Image const &image, vk::Format format, vk::ImageAspectFlags aspectFlags)
+        vk::raii::ImageView createImageView(vk::Image const &image, vk::Format format, vk::ImageAspectFlags aspectFlags, uint32_t mipLevels)
         {
             //left out .components initialization, because it is default initialized to vk::ComponentSwizzle::eIdentity anyway.
             //The components field allows you to swizzle the color channels around. For example, you can map all the channels to the red channel for a monochrome texture. You can also map constant values of 0 and 1 to a channel. 
@@ -1131,12 +1279,12 @@ class Window{
                 .image            = image,
                 .viewType         = vk::ImageViewType::e2D,
                 .format           = format,
-                .subresourceRange = {.aspectMask = aspectFlags, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1}};
+                .subresourceRange = {.aspectMask = aspectFlags, .levelCount = mipLevels, .layerCount = 1}};
             return vk::raii::ImageView(device, viewInfo);
         }
 
         void createTextureImageView(){
-            textureImageView = createImageView(*textureImage, vk::Format::eR8G8B8A8Srgb, vk::ImageAspectFlagBits::eColor);
+            textureImageView = createImageView(*textureImage, vk::Format::eR8G8B8A8Srgb, vk::ImageAspectFlagBits::eColor, mipLevels);
         }
 
         void createTextureSampler(){
@@ -1159,14 +1307,21 @@ class Window{
             */
 
             vk::PhysicalDeviceProperties properties = physicalDevice.getProperties();
+            //we’ve set up the sampler with linear filtering for both minification and magnification, and linear interpolation between mip levels. We’ve also set the mip level bias to 0.0f.
+            //SEE Commentary at beginning of file for Mipmapping: The minLod and maxLod are used to effectively set the range of mip levels to be used by clamping the minimum and maximum LOD values. By setting minLod to 0.0f and maxLod to vk::LodClampNone we ensure the full range of mip levels will be used.
             vk::SamplerCreateInfo samplerInfo{.magFilter = vk::Filter::eLinear,
                                               .minFilter = vk::Filter::eLinear,
                                               .mipmapMode = vk::SamplerMipmapMode::eLinear,
                                               .addressModeU = vk::SamplerAddressMode::eRepeat,
                                               .addressModeV = vk::SamplerAddressMode::eRepeat,
                                               .addressModeW = vk::SamplerAddressMode::eRepeat,
+                                              .mipLodBias       = 0.0f,
                                               .anisotropyEnable = true,
-                                              .maxAnisotropy = properties.limits.maxSamplerAnisotropy};
+                                              .maxAnisotropy = properties.limits.maxSamplerAnisotropy,
+                                              .compareEnable    = vk::False,
+                                              .compareOp        = vk::CompareOp::eAlways,
+                                              .minLod           = 0.0f,
+                                              .maxLod           = vk::LodClampNone};
             
             //just for future reference of properties available to the struct
             //This field specifies which color is returned when sampling beyond image with clamp to border addressing mode.
@@ -1212,8 +1367,8 @@ class Window{
             //That’s it for creating the depth image. We don’t need to map it or copy another image to it, because we’re going to clear it at the start of our command buffer like the color attachment.
             depthFormat = findDepthFormat();
 
-            std::tie(depthImage, depthImageMemory) = createImage(swapChainExtent.width, swapChainExtent.height, depthFormat, vk::ImageTiling::eOptimal, vk::ImageUsageFlagBits::eDepthStencilAttachment, vk::MemoryPropertyFlagBits::eDeviceLocal);
-            depthImageView = createImageView(depthImage, depthFormat, vk::ImageAspectFlagBits::eDepth);
+            std::tie(depthImage, depthImageMemory) = createImage(swapChainExtent.width, swapChainExtent.height, 1, depthFormat, vk::ImageTiling::eOptimal, vk::ImageUsageFlagBits::eDepthStencilAttachment, vk::MemoryPropertyFlagBits::eDeviceLocal);
+            depthImageView = createImageView(depthImage, depthFormat, vk::ImageAspectFlagBits::eDepth, 1);
         }
 
         //The typeFilter parameter will be used to specify the bit field of memory types that are suitable. That means that we can find the index of a suitable memory type by simply iterating over them and checking if the corresponding bit is set to 1.
@@ -1429,31 +1584,31 @@ class Window{
             UniformBufferObject ubo{};
             //The model rotation will be a simple rotation around the Z-axis using the time variable
             //Using a rotation angle of time * glm::radians(90.0f) accomplishes the purpose of rotating 90 degrees per second.
-            // /ubo.model = rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-            ubo.model = rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+            ubo.model = rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+            //ubo.model = rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 1.0f, 0.0f));
             //ubo.model = rotate(glm::mat4(1.0f), glm::radians(0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
 
             //For the view transformation I’ve decided to look at the geometry from above at a 45 degree angle. The glm::lookAt function takes the eye position, center position and up axis as parameters.
             //we dont want the camera at the origin because we'd be inside the shape. we want to look at the origin so 0.0f, 0.0f, 0.f, and well look from above at a 45degree angle
-            //ubo.view = lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+            ubo.view = lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
 
             //perspective(fov, aspect ratio, near plane, far plane)
             //It is important to use the current swap chain extent to calculate the aspect ratio to take into account the new width and height of the window after a resize.
-            //ubo.proj = glm::perspective(glm::radians(45.0f), static_cast<float>(swapChainExtent.width) / static_cast<float>(swapChainExtent.height), 0.1f, 10.0f);
+            ubo.proj = glm::perspective(glm::radians(45.0f), static_cast<float>(swapChainExtent.width) / static_cast<float>(swapChainExtent.height), 0.1f, 10.0f);
 
             //TEST FOR SugarCube_Corner
             //const glm::vec3 target(-1.304f, 47.348f, 5.429f);
-            const glm::vec3 target(0.0f, 47.348f, 3.0f);
-            const glm::vec3 eye = target + glm::vec3(120.0f, 120.0f, 120.0f);
+            // const glm::vec3 target(0.0f, 47.348f, 3.0f);
+            // const glm::vec3 eye = target + glm::vec3(120.0f, 120.0f, 120.0f);
 
-            ubo.view = glm::lookAt(eye, target, glm::vec3(0.0f, 1.0f, 0.0f));
+            // ubo.view = glm::lookAt(eye, target, glm::vec3(0.0f, 1.0f, 0.0f));
 
-            ubo.proj = glm::perspective(
-                glm::radians(30.0f),
-                static_cast<float>(swapChainExtent.width) / swapChainExtent.height,
-                0.1f,
-                500.0f
-            );
+            // ubo.proj = glm::perspective(
+            //     glm::radians(30.0f),
+            //     static_cast<float>(swapChainExtent.width) / swapChainExtent.height,
+            //     0.1f,
+            //     500.0f
+            // );
             //Using a UBO this way is not the most efficient way to pass frequently changing values to the shader. A more efficient way to pass a small buffer of data to shaders is push constants.
             memcpy(uniformBuffersMapped[currentImage], &ubo, sizeof(ubo));
 
@@ -1823,7 +1978,7 @@ class Window{
         //nodiscard is a standard attribute that encourages compiler to issue a warning if a function's return value is ignored. This is useful for functions that return important information or status codes that should be checked by the caller.
         [[nodiscard]] vk::raii::ShaderModule createShaderModule(const std::vector<char>& code) const {
             
-            //the size of the bytecode is specified in bytes but the bytecode pointer is a uin32_t poiniter rather than a char pointer. 
+            //the size of the bytecode is specified in bytes but the bytecode pointer is a uint32_t poiniter rather than a char pointer. 
             //Therefore, we need to multiply the size of the code by the size of a char to get the correct size in bytes. The reinterpret_cast<const uint32_t*> is used to convert the pointer type from const char* to const uint32_t*, which is required by Vulkan's shader module creation function.
             vk::ShaderModuleCreateInfo createInfo{ .codeSize  = code.size() * sizeof(char), .pCode = reinterpret_cast<const uint32_t*>(code.data()) };
             vk::raii::ShaderModule shaderModule{device, createInfo};
