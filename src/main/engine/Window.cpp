@@ -1649,7 +1649,7 @@ class Window{
             UniformBufferObject ubo{};
             //The model rotation will be a simple rotation around the Z-axis using the time variable
             //Using a rotation angle of time * glm::radians(90.0f) accomplishes the purpose of rotating 90 degrees per second.
-            ubo.model = rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+            ubo.model = rotate(glm::mat4(1.0f), time * glm::radians(0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
             //ubo.model = rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 1.0f, 0.0f));
             //ubo.model = rotate(glm::mat4(1.0f), glm::radians(0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
 
@@ -1663,7 +1663,7 @@ class Window{
 
             //TEST FOR SugarCube_Corner
             //const glm::vec3 target(-1.304f, 47.348f, 5.429f);
-            // const glm::vec3 target(0.0f, 47.348f, 3.0f);
+            // const glm::vec3 target(0.0f, 47.348f, 2.0f);
             // const glm::vec3 eye = target + glm::vec3(120.0f, 120.0f, 120.0f);
 
             // ubo.view = glm::lookAt(eye, target, glm::vec3(0.0f, 1.0f, 0.0f));
