@@ -392,7 +392,59 @@
             }
             If the object is close to the camera, magFilter is used as the filter. If the object is further from the camera, minFilter is used. Normally, lod is non-negative, and is only 0 when close the camera. mipLodBias lets us force Vulkan to use lower lod and level than it would normally use.
 
-*/          
+*/
+
+/*
+    Multisampling:
+        "aliasing" is a result of a limited number of pixels that are available for rendering. Since there are no displays out there with unlimited resolution, it will ALWAYS be visible to some extent.
+        There are a number of ways to fix this, I will be focusing on the more popular ones: Multisample antialiasing (MSAA)
+
+        MSAA is a type of spatial anti aliasing( a technique for minimizing distortion artifacts when representing a high resolution image at a lower resolution)
+        It is an optimizatino of supersampling(), where only the necessary parts are sampled more. Jaggies are only noticed in a small area, so the area is quickly found, and only that is anti-aliased
+
+        SuperSampling: Supersampling, often called SSAA, is an anti-aliasing method that renders an image above the display’s final resolution and then downsamples it to the target output. 
+        A higher render resolution gives the GPU more sample data to average into each final pixel, which helps reduce stair-stepping, crawling edges, and fine-detail breakup.
+        Think of a 1080p monitor showing a game rendered internally at 4K. Your screen still has 1,920 x 1,080 physical pixels, but the game engine first calculates a much denser image, then compresses that information into the 1080p frame. 
+        That extra information is why a diagonal sword edge, chain-link fence, or distant power line can look less harsh.
+        HOW? The process starts with the game or graphics application rendering the scene at a higher internal resolution than the monitor output. For example, a 2,560 x 1,440 screen might render at 3,840 x 2,160 internally, or a 1080p display might render at 1440p or 4K.
+        NEXT: the rendered frame is filtered and downsampled. During this stage, multiple high-resolution samples are averaged into each final display pixel. If four or more samples describe the edge between a dark object and a bright sky, the final pixel can represent that transition more gracefully instead of snapping to a hard, blocky edge.
+        Finally, the image is output at the monitor’s native resolution. A good downsampling filter matters because poor filtering can make the image look soft or blurry.
+
+        In supersample anti-aliasing, multiple locations are sampled within every pixel, and each of those samples[3] is fully rendered and combined with the others to produce the pixel that is ultimately displayed. This is computationally expensive, because the entire rendering process must be repeated for each sample location. 
+        It is also inefficient, as aliasing is typically only noticed in some parts of the image, such as the edges, whereas supersampling is performed for every single pixel.
+        In multisample anti-aliasing, if any of the multi sample locations in a pixel is covered by the triangle being rendered, a shading computation must be performed for that triangle. However this calculation only needs to be performed once for the whole pixel regardless of how many sample positions are covered; the result of the shading calculation is simply applied to all of the relevant multi sample locations.
+        In the case where only one triangle covers every multi sample location within the pixel, only one shading computation is performed, and these pixels are little more expensive than (and the result is no different from) the non-anti-aliased image. This is true of the middle of triangles, where aliasing is not an issue. (Edge detection can reduce this further by explicitly limiting the MSAA calculation to pixels whose samples involve multiple triangles, or triangles at multiple depths.) 
+        In the extreme case where each of the multi sample locations is covered by a different triangle, a different shading computation will be performed for each location and the results then combined to give the final pixel, and the result and computational expense are the same as in the equivalent supersampled image.
+
+        MSAA Sampling Methods:
+            Point sampling: In a point-sampled mask, the coverage bit for each multisample is only set if the multisample is located inside the rendered primitive. Samples are never taken from outside a rendered primitive, so images produced using point-sampling will be geometrically correct, but filtering quality may be low because the proportion of bits set in the pixel's coverage mask may not be equal to the proportion of the pixel that is actually covered by the fragment in question.
+
+            Area Sampling: Filtering quality can be improved by using area sampled masks. In this method, the number of bits set in a coverage mask for a pixel should be proportionate to the actual area coverage of the fragment. This will result in some coverage bits being set for multisamples that are not actually located within the rendered primitive, and can cause aliasing and other artifacts.
+
+        MSAA Sample patterns:
+            regular grid: A regular grid sample pattern, where multisample locations form an evenly spaced grid throughout the pixel, is easy to implement and simplifies attribute evaluation (i.e. setting subpixel masks, sampling color and depth). This method is computationally expensive due to the large number of samples. Edge optimization is poor for screen-aligned edges, but image quality is good when the number of multisamples is large.
+
+            sparse regular grid: A sparse regular grid sample pattern is a subset of samples that are chosen from the regular grid sample pattern. As with the regular grid, attribute evaluation is simplified due to regular spacing. The method is less computationally expensive due to having a fewer samples. Edge optimization is good for screen aligned edges, and image quality is good for a moderate number of multisamples.
+
+            stochastic sample patterns: A stochastic sample pattern is a random distribution of multisamples throughout the pixel. The irregular spacing of samples makes attribute evaluation complicated. The method is cost efficient due to low sample count (compared to regular grid patterns). Edge optimization with this method, although sub-optimal for screen aligned edges. Image quality is excellent for a moderate number of samples.
+
+        More on the ISSSUE:
+
+            In ordinary rendering, the pixel color is determined based on a single sample point which in most cases is the center of the target pixel on screen. If part of a drawn line passes through a certain pixel but doesn’t cover the sample point, that pixel will be left blank, leading to the jagged "staircase" effect.
+            What MSAA does is it uses mutiple sample points PER PIXEL to determine final color. MORE SAMPLES = BETTER RESULTS BUT MORE EXPENSIVE COMPUTATIONALLY
+
+        I will focus on using the MAXIMUM available sample count FOR NOW!
+
+        In MSAA, each pixel is sampled in an offscreen buffer which is then rendered to the screen. This new buffer is slightly different from regular images we’ve been rendering to - they have to be able to store more than one sample per pixel. 
+        Once a multi-sampled buffer is created, it has to be resolved to the default framebuffer (which stores only a single sample per pixel). This is why we have to create an additional render target and modify our current drawing process
+
+        There are certain limitations of my current MSAA implementation that may impact the quality of the output image in more detailed scenes. For example, we’re currently not solving potential problems caused by shader aliasing, i.e. 
+        MSAA only smoothens out the edges of geometry but not the interior filling. This may lead to a situation when you get a smooth polygon rendered on screen, but the applied texture will still look aliased if it contains high contrasting colors. 
+        One way to approach this problem is to enable Sample Shading which will improve the image quality even further, though at an additional performance cost
+
+
+
+*/
 
 /*
     readFile function will read all the bytes from the specified file and return them in a byte array managed by std::vector. 
@@ -590,6 +642,12 @@ class Window{
         std::vector<Vertex> vertices;
         std::vector<uint32_t>indices; //changing datatype of indices from uin16_t to uint_32 because there are goiing to be a lot more vertices than 65535(2^16 - 1)
 
+        //MSAA
+        vk::SampleCountFlagBits msaaSamples = vk::SampleCountFlagBits::e1; //default to one sample per pixel(NO MULTISAMPLING)
+        vk::raii::Image colorImage = nullptr; //This new image will have to store the desired number of samples per pixel, so we need to pass this number to vk::ImageCreateInfo during the image creation process
+        vk::raii::DeviceMemory colorImageMemory = nullptr;
+        vk::raii::ImageView colorImageView = nullptr;
+
         //frame index
         uint32_t frameIndex = 0;
 
@@ -621,6 +679,7 @@ class Window{
             createDescriptorSetLayout();
             createGraphicsPipeline();
             createCommandPool();
+            createColorResources();
             createDepthResources();
             createTextureImage();
             createTextureImageView();
@@ -677,6 +736,8 @@ class Window{
                 throw std::runtime_error( "failed to find a suitable GPU!" );
             }
             physicalDevice = *devIter;
+
+            msaaSamples = getMaxUsableSampleCount();
         }
 
         void createInstance(){
@@ -777,6 +838,7 @@ class Window{
 
             createSwapChain();
             createImageViews();
+            createColorResources(); //so that the new color image can be recreated in the correct resolution when window resized
             createDepthResources();
         }
 
@@ -914,7 +976,8 @@ class Window{
 
                     vk::SampleCountFlagBits::e1 is a Vulkan enumeration token used in the Vulkan-Hpp C++ bindings to specify that a resource (like an image or a framebuffer) uses 1 sample per pixel
             */
-            vk::PipelineMultisampleStateCreateInfo multisampling{.rasterizationSamples = vk::SampleCountFlagBits::e1, .sampleShadingEnable = vk::False};
+           //min fractino for sample shading; closer to one is smoother
+            vk::PipelineMultisampleStateCreateInfo multisampling{.rasterizationSamples = msaaSamples, .sampleShadingEnable = vk::True, .minSampleShading = 2.0f};
 
             /*
                 Depth and stencil testing
@@ -1016,7 +1079,7 @@ class Window{
             commandPool = vk::raii::CommandPool(device, poolInfo);
         }
 
-        std::pair<vk::raii::Image, vk::raii::DeviceMemory> createImage(uint32_t width, uint32_t height, uint32_t mipLevels, vk::Format format, vk::ImageTiling tiling, vk::ImageUsageFlags usage, vk::MemoryPropertyFlags properties){
+        std::pair<vk::raii::Image, vk::raii::DeviceMemory> createImage(uint32_t width, uint32_t height, uint32_t mipLevels, vk::SampleCountFlagBits numSamples, vk::Format format, vk::ImageTiling tiling, vk::ImageUsageFlags usage, vk::MemoryPropertyFlags properties){
             //Although we could set up the shader to access the pixel values in the buffer, it’s better to use image objects in Vulkan for this purpose. Image objects will make it easier and faster to retrieve colors by allowing us to use 2D coordinates, for one. 
             //pixels within an image object are known as texels
 
@@ -1045,10 +1108,11 @@ class Window{
                                             .extent = {width, height, 1},
                                             .mipLevels = mipLevels,
                                             .arrayLayers = 1,
-                                            .samples = vk::SampleCountFlagBits::e1,
+                                            .samples = numSamples,
                                             .tiling = tiling,
                                             .usage = usage,
-                                            .sharingMode = vk::SharingMode::eExclusive};
+                                            .sharingMode = vk::SharingMode::eExclusive,
+                                            .initialLayout = vk::ImageLayout::eUndefined};
             
             //Note: It is possible that the vk::Format::eR8G8B8A8Srgb, format is not supported by the graphics hardware.
             vk::raii::Image image = vk::raii::Image(device, imageInfo);
@@ -1173,6 +1237,7 @@ class Window{
             std::tie(textureImage, textureImageMemory) = createImage(texWidth,
                                                            texHeight,
                                                            mipLevels,
+                                                           vk::SampleCountFlagBits::e1,
                                                            vk::Format::eR8G8B8A8Srgb,
                                                            vk::ImageTiling::eOptimal,
                                                            vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
@@ -1367,7 +1432,7 @@ class Window{
             //That’s it for creating the depth image. We don’t need to map it or copy another image to it, because we’re going to clear it at the start of our command buffer like the color attachment.
             depthFormat = findDepthFormat();
 
-            std::tie(depthImage, depthImageMemory) = createImage(swapChainExtent.width, swapChainExtent.height, 1, depthFormat, vk::ImageTiling::eOptimal, vk::ImageUsageFlagBits::eDepthStencilAttachment, vk::MemoryPropertyFlagBits::eDeviceLocal);
+            std::tie(depthImage, depthImageMemory) = createImage(swapChainExtent.width, swapChainExtent.height, 1, msaaSamples, depthFormat, vk::ImageTiling::eOptimal, vk::ImageUsageFlagBits::eDepthStencilAttachment, vk::MemoryPropertyFlagBits::eDeviceLocal);
             depthImageView = createImageView(depthImage, depthFormat, vk::ImageAspectFlagBits::eDepth, 1);
         }
 
@@ -1744,6 +1809,17 @@ class Window{
                 vk::ImageAspectFlagBits::eDepth
             );
 
+            // Transition the multisampled color image to vk::ImageLayout::eColorAttachmentOptimal
+            transition_image_layout(
+                *colorImage,
+                vk::ImageLayout::eUndefined,
+                vk::ImageLayout::eColorAttachmentOptimal,
+                vk::AccessFlagBits2::eColorAttachmentWrite,
+                vk::AccessFlagBits2::eColorAttachmentWrite,
+                vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+                vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+                vk::ImageAspectFlagBits::eColor);
+
             //setup color attachement
             vk::ClearValue clearColor = vk::ClearColorValue(0.0f, 0.0f, 0.0f, 1.0f); //black
 
@@ -1754,9 +1830,13 @@ class Window{
                 The loadOp parameter specifies what to do with the image before rendering, and the storeOp parameter specifies what to do with the image after rendering. 
                 We’re using vk::AttachmentLoadOp::eClear to clear the image to black before rendering, and vk::AttachmentStoreOp::eStore to store the rendered image for later use.
             */
+           //nstead of using the swapChainImageViews[imageIndex] as the color attachment in the vk::RenderingInfo with vk::CommandBuffer::beginRendering, we’re using the colorImageView with the swapChainImageViews[imageIndex] as the resolve image view, using vk::ResolveModeFlagBits::eAverage as the resolve mode
             vk::RenderingAttachmentInfo attachmentInfo = {
-                .imageView   = swapChainImageViews[imageIndex],
+                .imageView   = colorImageView,
                 .imageLayout = vk::ImageLayout::eColorAttachmentOptimal,
+                .resolveMode = vk::ResolveModeFlagBits::eAverage,
+                .resolveImageView = swapChainImageViews[imageIndex],
+                .resolveImageLayout = vk::ImageLayout::eColorAttachmentOptimal,
                 .loadOp      = vk::AttachmentLoadOp::eClear,
                 .storeOp     = vk::AttachmentStoreOp::eStore,
                 .clearValue  = clearColor};
@@ -1886,7 +1966,7 @@ class Window{
 		                   vk::PhysicalDeviceVulkan13Features,
 		                   vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>
 		    featureChain = {
-		        {.features = {.samplerAnisotropy = true }}, // vk::PhysicalDeviceFeatures2
+		        {.features = {.sampleRateShading = vk::True, .samplerAnisotropy = vk::True }}, // vk::PhysicalDeviceFeatures2
                 {.synchronization2 = true, .dynamicRendering = true }, // vk::PhysicalDeviceVulkan13Features                                  
 		        {.extendedDynamicState = true}         // vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT
 		    };
@@ -2092,6 +2172,40 @@ class Window{
             
             //advancing to next frame each time
             frameIndex = (frameIndex + 1) % MAX_FRAMES_IN_FLIGHT; //modulo ensures we loop around after every MAX_FRAMES_IN_FLIGHT enqueued frames
+        }
+
+        //I'm using a depth buffer as well, so we have to take into account the sample count for both color and depth. The highest sample count that both support will be the maximum we can support.
+        vk::SampleCountFlagBits getMaxUsableSampleCount(){
+            vk::PhysicalDeviceProperties physicalDeviceProperties = physicalDevice.getProperties();
+
+            vk::SampleCountFlags counts = physicalDeviceProperties.limits.framebufferColorSampleCounts & physicalDeviceProperties.limits.framebufferDepthSampleCounts;
+
+            if(counts & vk::SampleCountFlagBits::e64) {return vk::SampleCountFlagBits::e64;}
+            if(counts & vk::SampleCountFlagBits::e32) {return vk::SampleCountFlagBits::e32;}
+            if(counts & vk::SampleCountFlagBits::e16) {return vk::SampleCountFlagBits::e16;}
+            if(counts & vk::SampleCountFlagBits::e8) {return vk::SampleCountFlagBits::e8;}
+            if(counts & vk::SampleCountFlagBits::e4) {return vk::SampleCountFlagBits::e4;}
+            if(counts & vk::SampleCountFlagBits::e2) {return vk::SampleCountFlagBits::e2;}
+
+            return vk::SampleCountFlagBits::e1;
+        }
+
+        //createing multi-sampled color buffer. Using only one mip level because this is enforced by the Vulkan specification in case of images with more than one sample per pixel. Also, this color buffer doesn’t need mipmaps since it’s not going to be used as a texture
+        void createColorResources(){
+            vk::Format colorFormat = swapChainSurfaceFormat.format;
+
+            std::tie(colorImage, colorImageMemory) = createImage(
+                swapChainExtent.width,
+                swapChainExtent.height,
+                1,
+                msaaSamples,
+                colorFormat,
+                vk::ImageTiling::eOptimal,
+                vk::ImageUsageFlagBits::eTransientAttachment | vk::ImageUsageFlagBits::eColorAttachment,
+                vk::MemoryPropertyFlagBits::eDeviceLocal
+            );
+
+            colorImageView = createImageView(colorImage, colorFormat, vk::ImageAspectFlagBits::eColor, 1);
         }
 
         void mainLoop(){
