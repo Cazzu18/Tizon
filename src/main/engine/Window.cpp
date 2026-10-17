@@ -447,6 +447,35 @@
 */
 
 /*
+    Rendering Multiple Objects:
+
+        When rendering multiple objects, we need to consider which resources should be: 1. Shared across all objects - to minimize memory usage and state changes 2. Duplicated for each object - to allow for independent positioning and appearance
+        Here’s a quick reference for what typically falls into each category:
+
+        Shared resources:
+            Vertex and index buffers (when objects use the same mesh)
+            Textures and samplers (when objects use the same textures)
+            Pipeline objects and pipeline layouts
+            Render passes
+            Command pools
+
+        Per-object resources:
+            Transformation matrices (position, rotation, scale)
+            Uniform buffers containing those matrices
+            Descriptor sets that reference those uniform buffers
+            Push constants (for small, frequently changing data)
+
+        Performance Considerations
+            When rendering multiple objects, keep these performance considerations in mind:
+
+                Minimize state changes: Group objects by material/texture to reduce binding changes.
+                Use instancing for many identical objects (not covered in this tutorial).
+                Consider push constants for small, frequently changing data instead of uniform buffers.
+                Batch draw calls where possible to reduce CPU overhead.
+                Use indirect drawing for large numbers of objects (not covered here).
+*/
+
+/*
     readFile function will read all the bytes from the specified file and return them in a byte array managed by std::vector. 
     We start by opening the file with two flags:
         ate: Start reading at the end of the file
@@ -454,6 +483,33 @@
 
     The advantage of starting to read at the end of the file is that we can use the read position to determine the size of the file and allocate a buffer:
 */
+
+//
+struct GameObject{
+    //Transform properties
+    glm::vec3 position {0.0f, 0.0f, 0.0f};
+    glm::vec3 rotation = {0.0f, 0.0f, 0.0f};
+    glm::vec3 scale = {1.0f, 1.0f, 1.0f};
+
+    //uniform buffer for this object(oner per frame in flight)
+    std::vector<vk::raii::Buffer> uniformBuffers;
+    std::vector<vk::raii::DeviceMemory> uniformBuffersMemory;
+    std::vector<void*> uniformBuffersMapped;
+
+    //Descriptor sets for this object(oner per frame in flight)
+    std::vector<vk::raii::DescriptorSet> descriptorSets;
+
+    //Calculate Model matrix based on position, rotation, and scale
+    glm::mat4 getModelMatrix() const {
+        glm::mat4 model = glm::mat4(1.0f);
+        model = glm::translate(model, position);
+        model = glm::rotate(model, rotation.x, glm::vec3(1.0f, 0.0f, 0.0f));
+        model = glm::rotate(model, rotation.y, glm::vec3(0.0f, 1.0f, 0.0f));
+        model = glm::rotate(model, rotation.z, glm::vec3(0.0f, 0.0f, 1.0f));
+        model = glm::scale(model, scale);
+        return model;
+    }
+};
 
 struct Vertex{
     glm::vec3 pos;
@@ -569,6 +625,7 @@ constexpr uint32_t WIDTH = 800;
 constexpr uint32_t HEIGHT = 600;
 const std::string TEXTURE_PATH = "textures/viking_room.png";
 const std::string MODEL_PATH = "models/viking_room.obj";
+constexpr int MAX_OBJECTS = 3;
 
 //Desfining how many frames should be processed concurrently. That is, allow the rendering of one frame to not interfere with the recording of the next
 //we choose 2 because although we have 3 images, we don't want the CPU to get too dar ahead of the GPU
@@ -648,6 +705,9 @@ class Window{
         vk::raii::DeviceMemory colorImageMemory = nullptr;
         vk::raii::ImageView colorImageView = nullptr;
 
+        //array of game objects to render
+        std::array<GameObject, MAX_OBJECTS> gameObjects;
+
         //frame index
         uint32_t frameIndex = 0;
 
@@ -687,11 +747,30 @@ class Window{
             loadModel();
             createVertexBuffer();
             createIndexBuffer();
+            setupGameObjects();
             createUniformBuffers();
             createDescriptorPool();
             createDescriptorSets();
             createCommandBuffers();
             createSyncObjects();
+        }
+
+        //game objects with different positions, rotations, and scales
+        void setupGameObjects(){
+            // Object 1 - Center
+            gameObjects[0].position = {0.0f, 0.0f, 0.0f};
+            gameObjects[0].rotation = {0.0f, 0.0f, 0.0f};
+            gameObjects[0].scale = {1.0f, 1.0f, 1.0f};
+
+            // Object 2 - Left
+            gameObjects[1].position = {-2.0f, 0.0f, -1.0f};
+            gameObjects[1].rotation = {0.0f, glm::radians(45.0f), 0.0f};
+            gameObjects[1].scale = {0.75f, 0.75f, 0.75f};
+
+            // Object 3 - Right
+            gameObjects[2].position = {2.0f, 0.0f, -1.0f};
+            gameObjects[2].rotation = {0.0f, glm::radians(-45.0f), 0.0f};
+            gameObjects[2].scale = {0.75f, 0.75f, 0.75f};
         }
 
         bool isDeviceSuitable( vk::raii::PhysicalDevice const & physicalDevice )
@@ -1625,41 +1704,77 @@ class Window{
         }
 
         void createUniformBuffers(){
-            for(size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++){
-                vk::DeviceSize bufferSize = sizeof(UniformBufferObject);
-                auto[buffer, bufferMem] = createBuffer(
-                    bufferSize, vk::BufferUsageFlagBits::eUniformBuffer, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent
-                );
-                uniformBuffers.emplace_back(std::move(buffer));
-                uniformBuffersMemory.emplace_back(std::move(bufferMem));
+            // for(size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++){
+            //     vk::DeviceSize bufferSize = sizeof(UniformBufferObject);
+            //     auto[buffer, bufferMem] = createBuffer(
+            //         bufferSize, vk::BufferUsageFlagBits::eUniformBuffer, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent
+            //     );
+            //     uniformBuffers.emplace_back(std::move(buffer));
+            //     uniformBuffersMemory.emplace_back(std::move(bufferMem));
                 
-                //We map the buffer right after creation using vk::raii::DeviceMemory::mapMemory to get a pointer to which we can write the data later on. 
-                //The buffer stays mapped to this pointer for the application’s whole lifetime. This technique is called "persistent mapping" and works on all Vulkan implementations.
-                uniformBuffersMapped.emplace_back(uniformBuffersMemory.back().mapMemory(0, bufferSize));///.back() returns a reference to the last element in the vector. .mapMemory(offset, size) maps the device memory into application address space
+            //     //We map the buffer right after creation using vk::raii::DeviceMemory::mapMemory to get a pointer to which we can write the data later on. 
+            //     //The buffer stays mapped to this pointer for the application’s whole lifetime. This technique is called "persistent mapping" and works on all Vulkan implementations.
+            //     uniformBuffersMapped.emplace_back(uniformBuffersMemory.back().mapMemory(0, bufferSize));///.back() returns a reference to the last element in the vector. .mapMemory(offset, size) maps the device memory into application address space
+            // }
+
+            // For each game object
+            for (auto& gameObject : gameObjects) {
+                gameObject.uniformBuffers.clear();
+                gameObject.uniformBuffersMemory.clear();
+                gameObject.uniformBuffersMapped.clear();
+
+                //Create uniform buffers for each frame in flight
+                for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+                    vk::DeviceSize bufferSize = sizeof(UniformBufferObject);
+                    auto [buffer, bufferMem] = createBuffer(bufferSize, vk::BufferUsageFlagBits::eUniformBuffer,
+                                vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+                    gameObject.uniformBuffers.emplace_back(std::move(buffer));
+                    gameObject.uniformBuffersMemory.emplace_back(std::move(bufferMem));
+                    gameObject.uniformBuffersMapped.emplace_back(gameObject.uniformBuffersMemory[i].mapMemory(0, bufferSize));
+                }
             }
         }
 
-        void updateUniformBuffer(uint32_t currentImage){
+        //sharing the view and projection matrices across all objects, but each object has its own model matrix.
+        void updateUniformBuffer(){
             static auto startTime = std::chrono::high_resolution_clock::now();
-
             auto currentTime = std::chrono::high_resolution_clock::now();
-
             float time = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - startTime).count();
 
-            UniformBufferObject ubo{};
+            
             //The model rotation will be a simple rotation around the Z-axis using the time variable
             //Using a rotation angle of time * glm::radians(90.0f) accomplishes the purpose of rotating 90 degrees per second.
-            ubo.model = rotate(glm::mat4(1.0f), time * glm::radians(0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+            //ubo.model = rotate(glm::mat4(1.0f), time * glm::radians(0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
             //ubo.model = rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 1.0f, 0.0f));
             //ubo.model = rotate(glm::mat4(1.0f), glm::radians(0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
 
             //For the view transformation I’ve decided to look at the geometry from above at a 45 degree angle. The glm::lookAt function takes the eye position, center position and up axis as parameters.
             //we dont want the camera at the origin because we'd be inside the shape. we want to look at the origin so 0.0f, 0.0f, 0.f, and well look from above at a 45degree angle
-            ubo.view = lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+            glm::mat4 view = lookAt(glm::vec3(8.0f, 3.0f, 1.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
 
             //perspective(fov, aspect ratio, near plane, far plane)
             //It is important to use the current swap chain extent to calculate the aspect ratio to take into account the new width and height of the window after a resize.
-            ubo.proj = glm::perspective(glm::radians(45.0f), static_cast<float>(swapChainExtent.width) / static_cast<float>(swapChainExtent.height), 0.1f, 10.0f);
+            glm::mat4 proj = glm::perspective(glm::radians(35.0f), static_cast<float>(swapChainExtent.width) / static_cast<float>(swapChainExtent.height), 0.1f, 20.0f);
+
+            // Update uniform buffers for each object
+            for (auto& gameObject : gameObjects) {
+                //Apply continuous rotation to the object
+                gameObject.rotation.y += 0.001f; // Slow rotation around Y axis
+
+                //Get the model matrix for this object
+                glm::mat4 initialRotation = glm::rotate(glm::mat4(1.0f), glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+                glm::mat4 model = gameObject.getModelMatrix() * initialRotation;
+
+                //Create and update the UBO
+                UniformBufferObject ubo{
+                    .model = model,
+                    .view = view,
+                    .proj = proj
+                };
+
+                // Copy the UBO data to the mapped memory
+                memcpy(gameObject.uniformBuffersMapped[frameIndex], &ubo, sizeof(ubo));
+            }
 
             //TEST FOR SugarCube_Corner
             //const glm::vec3 target(-1.304f, 47.348f, 5.429f);
@@ -1675,60 +1790,68 @@ class Window{
             //     500.0f
             // );
             //Using a UBO this way is not the most efficient way to pass frequently changing values to the shader. A more efficient way to pass a small buffer of data to shaders is push constants.
-            memcpy(uniformBuffersMapped[currentImage], &ubo, sizeof(ubo));
+            //memcpy(uniformBuffersMapped[currentImage], &ubo, sizeof(ubo));
 
         }
 
         void createDescriptorPool(){
-            std::array<vk::DescriptorPoolSize, 2> poolSize{{{.type = vk::DescriptorType::eUniformBuffer, .descriptorCount = MAX_FRAMES_IN_FLIGHT},
-                                                {.type = vk::DescriptorType::eCombinedImageSampler, .descriptorCount = MAX_FRAMES_IN_FLIGHT}}};
+            //We need MAX_OBJECTS * MAX_FRAMES_IN_FLIGHT descriptor set
+            std::array poolSize {
+                vk::DescriptorPoolSize(vk::DescriptorType::eUniformBuffer, MAX_OBJECTS * MAX_FRAMES_IN_FLIGHT),
+                vk::DescriptorPoolSize(vk::DescriptorType::eCombinedImageSampler, MAX_OBJECTS * MAX_FRAMES_IN_FLIGHT)
+            };
 
-            //The structure has an optional flag similar to command pools that determines if individual descriptor sets can be freed or not. As the vk::raii::DescriptorSets destroy the underlying vk::DescriptorSet on destruction we need to set it to vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet to allow that.
-            vk::DescriptorPoolCreateInfo          poolInfo{.flags         = vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet,
-                                                        .maxSets       = MAX_FRAMES_IN_FLIGHT,
-                                                        .poolSizeCount = static_cast<uint32_t>(poolSize.size()),
-                                                        .pPoolSizes    = poolSize.data()};
+            vk::DescriptorPoolCreateInfo poolInfo{
+                .flags = vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet,
+                .maxSets = MAX_OBJECTS * MAX_FRAMES_IN_FLIGHT,
+                .poolSizeCount = static_cast<uint32_t>(poolSize.size()),
+                .pPoolSizes = poolSize.data()
+            };
 
-            descriptorPool =vk::raii::DescriptorPool(device, poolInfo);
+            descriptorPool = vk::raii::DescriptorPool(device, poolInfo);
         }
 
         void createDescriptorSets(){
 
-            //one descriptor set for each frame in flight, all with the same layout.
-            std::vector<vk::DescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, *descriptorSetLayout);
-            vk::DescriptorSetAllocateInfo allocInfo{.descriptorPool = descriptorPool,
-                                                    .descriptorSetCount = static_cast<uint32_t>(layouts.size()),
-                                                    .pSetLayouts = layouts.data()};
+            for(auto& gameObject : gameObjects){
+                //Creating descriptor sets for each frame in flight
+                //one descriptor set for each frame in flight, all with the same layout.
+                std::vector<vk::DescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, *descriptorSetLayout);
+                vk::DescriptorSetAllocateInfo allocInfo{.descriptorPool = descriptorPool,
+                                                        .descriptorSetCount = static_cast<uint32_t>(layouts.size()),
+                                                        .pSetLayouts = layouts.data()};
 
-            //allocating descriptor sets. We still need to configure the descriptors within
-            descriptorSets = device.allocateDescriptorSets(allocInfo);
+                gameObject.descriptorSets.clear();
+                gameObject.descriptorSets = device.allocateDescriptorSets(allocInfo); //allocating descriptor sets. We still need to configure the descriptors within
+                
+                //Descriptors that refer to buffers, like our uniform buffer descriptor, are configured with a vk::DescriptorBufferInfo struct. This structure specifies the buffer and the region within it that contains the data for the descriptor.
+                for(size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++){
 
-            //Descriptors that refer to buffers, like our uniform buffer descriptor, are configured with a vk::DescriptorBufferInfo struct. This structure specifies the buffer and the region within it that contains the data for the descriptor.
-            for(size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++){
-                vk::DescriptorBufferInfo bufferInfo{.buffer = uniformBuffers[i], .offset = 0, .range = sizeof(UniformBufferObject)};
-                //The resources for a combined image sampler structure must be specified in a vk::DescriptorImageInfo struct, just like the buffer resource for a uniform buffer descriptor is specified in a vk::DescriptorBufferInfo struct
-                vk::DescriptorImageInfo  imageInfo{.sampler = textureSampler, .imageView = textureImageView, .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal};
-                /*
-                    The first two fields specify the descriptor set to update and the binding. We gave our uniform buffer binding index 0. Remember that descriptors can be arrays, so we also need to specify the first index in the array that we want to update. 
-                    We’re not using an array, so the index is simply 0. We need to specify the type of descriptor again. It’s possible to update multiple descriptors at once in an array, starting at index dstArrayElement. 
-                    The descriptorCount field specifies how many array elements you want to update. The last field references an array with descriptorCount structs that actually configure the descriptors. 
-                    It depends on the type of descriptor which one of the three you actually need to use. The pBufferInfo field is used for descriptors that refer to buffer data. There are additional elements in this struct, that are not used in this sample: pImageInfo is used for descriptors that refer to image data, and pTexelBufferView is used for descriptors that refer to buffer views. Our descriptor is based on buffers, so we’re just using pBufferInfo.
-                */
-                std::array<vk::WriteDescriptorSet, 2> descriptorWrites{{{.dstSet          = descriptorSets[i],
-                                                                        .dstBinding      = 0,
-                                                                        .dstArrayElement = 0,
-                                                                        .descriptorCount = 1,
-                                                                        .descriptorType  = vk::DescriptorType::eUniformBuffer,
-                                                                        .pBufferInfo     = &bufferInfo},
-                                                                        {.dstSet          = descriptorSets[i],
-                                                                        .dstBinding      = 1,
-                                                                        .dstArrayElement = 0,
-                                                                        .descriptorCount = 1,
-                                                                        .descriptorType  = vk::DescriptorType::eCombinedImageSampler,
-                                                                        .pImageInfo      = &imageInfo}}};
-                //The updates are applied using vk::raii::Device::updateDescriptorSets. It accepts two arrays as parameters: an array of vk::WriteDescriptorSet and an array of vk::CopyDescriptorSet. 
-                //The latter can be used to copy descriptors to each other, as its name implies.
-                device.updateDescriptorSets(descriptorWrites, {});
+                    vk::DescriptorBufferInfo bufferInfo{.buffer = *gameObject.uniformBuffers[i], .offset = 0, .range = sizeof(UniformBufferObject)};
+                    //The resources for a combined image sampler structure must be specified in a vk::DescriptorImageInfo struct, just like the buffer resource for a uniform buffer descriptor is specified in a vk::DescriptorBufferInfo struct
+                    vk::DescriptorImageInfo  imageInfo{.sampler = *textureSampler, .imageView = *textureImageView, .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal};
+                    /*
+                        The first two fields specify the descriptor set to update and the binding. We gave our uniform buffer binding index 0. Remember that descriptors can be arrays, so we also need to specify the first index in the array that we want to update. 
+                        We’re not using an array, so the index is simply 0. We need to specify the type of descriptor again. It’s possible to update multiple descriptors at once in an array, starting at index dstArrayElement. 
+                        The descriptorCount field specifies how many array elements you want to update. The last field references an array with descriptorCount structs that actually configure the descriptors. 
+                        It depends on the type of descriptor which one of the three you actually need to use. The pBufferInfo field is used for descriptors that refer to buffer data. There are additional elements in this struct, that are not used in this sample: pImageInfo is used for descriptors that refer to image data, and pTexelBufferView is used for descriptors that refer to buffer views. Our descriptor is based on buffers, so we’re just using pBufferInfo.
+                    */
+                    std::array<vk::WriteDescriptorSet, 2> descriptorWrites{{{.dstSet          = *gameObject.descriptorSets[i],
+                                                                            .dstBinding      = 0,
+                                                                            .dstArrayElement = 0,
+                                                                            .descriptorCount = 1,
+                                                                            .descriptorType  = vk::DescriptorType::eUniformBuffer,
+                                                                            .pBufferInfo     = &bufferInfo},
+                                                                            {.dstSet          = *gameObject.descriptorSets[i],
+                                                                            .dstBinding      = 1,
+                                                                            .dstArrayElement = 0,
+                                                                            .descriptorCount = 1,
+                                                                            .descriptorType  = vk::DescriptorType::eCombinedImageSampler,
+                                                                            .pImageInfo      = &imageInfo}}};
+                    //The updates are applied using vk::raii::Device::updateDescriptorSets. It accepts two arrays as parameters: an array of vk::WriteDescriptorSet and an array of vk::CopyDescriptorSet. 
+                    //The latter can be used to copy descriptors to each other, as its name implies.
+                    device.updateDescriptorSets(descriptorWrites, {});
+                }
             }
         }
 
@@ -1872,7 +1995,6 @@ class Window{
             commandBuffer.bindVertexBuffers(0, *vertexBuffer, {0});
             //binding index buffer
             commandBuffer.bindIndexBuffer(*indexBuffer, 0, vk::IndexTypeValue<decltype(indices)::value_type>::value); //vk::IndexTypeValue<decltype(indices)::value_type>::value automatically gets the indices type. decltype is a type specifier that inspects the declared type of an entity or the type of an expression at compile time
-    
 
             //because we specifyed viewport and scissor state to dynamic for the pipeline, we neet to set then in the CB before isuing drawing command
             //we give it a negative height to flip the Y axis during the viewport transform, which is applied after clipping - the net eeffect on the final image is identical to  flipping the projection matrix, but the projection matrix is left alone.
@@ -1894,7 +2016,7 @@ class Window{
                 The next parameter is the layout that the descriptors are based on. The next two parameters specify the index of the first descriptor set, and the array of sets to bind. 
                 The last parameter specifies an array of offsets that are used for dynamic descriptors. We’ll look at these in a future chapter.
             */
-            commandBuffers[frameIndex].bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipelineLayout, 0, *descriptorSets[frameIndex], nullptr);
+            //commandBuffers[frameIndex].bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipelineLayout, 0, *descriptorSets[frameIndex], nullptr);
 
 
             /*
@@ -1904,7 +2026,22 @@ class Window{
                 The second to last parameter specifies an offset to add to the vertex index before indexing into the vertex buffer. 
                 The final parameter specifies an offset for instancing, which we’re not using.
             */
-            commandBuffer.drawIndexed(static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
+            //commandBuffer.drawIndexed(static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
+
+            // Draw each object with its own descriptor set
+            for (const auto& gameObject : gameObjects) {
+                //Bind the descriptor set for this object
+                commandBuffers[frameIndex].bindDescriptorSets(
+                    vk::PipelineBindPoint::eGraphics,
+                    *pipelineLayout,
+                    0,
+                    *gameObject.descriptorSets[frameIndex],
+                    nullptr
+                );
+
+                //Draw the object
+                commandBuffers[frameIndex].drawIndexed(indices.size(), 1, 0, 0, 0);
+            }
 
             //end rendering
             commandBuffer.endRendering();
@@ -2124,8 +2261,8 @@ class Window{
             commandBuffers[frameIndex].reset();
             recordCommandBuffer(imageIndex);
 
-            updateUniformBuffer(frameIndex); //generate a new transformation every frame to make the geometry spin around.
-
+            //updateUniformBuffer(frameIndex); //generate a new transformation every frame to make the geometry spin around.
+            updateUniformBuffer();
             //now we can submit the recorded command buffer
             //Queue submission and synchronization is configured through parameters in the vk::SubmitInfo structure.
             /*
@@ -2217,7 +2354,21 @@ class Window{
             device.waitIdle();
         }
 
+        //Since each GameObject now owns its own uniform buffers, cleanup needs to unmap and release them individually
         void cleanup(){
+
+            for (auto& gameObject : gameObjects) {
+                for (size_t i = 0; i < gameObject.uniformBuffersMemory.size(); i++) {
+                    if (gameObject.uniformBuffersMapped[i] != nullptr) {
+                        gameObject.uniformBuffersMemory[i].unmapMemory();
+                    }
+                }
+
+                gameObject.uniformBuffers.clear();
+                gameObject.uniformBuffersMemory.clear();
+                gameObject.uniformBuffersMapped.clear();
+                gameObject.descriptorSets.clear();
+            }
 
             cleanupSwapChain();
 
