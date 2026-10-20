@@ -476,6 +476,20 @@
 */
 
 /*
+    Multithreading:
+
+        Vulkan was designed with multithreading in mind, offering several advantages over older APIs:
+            Thread-safe command buffer recording: Multiple threads can record commands to different command buffers simultaneously.
+            Explicit synchronization: Vulkan requires explicit synchronization, giving you precise control over resource access across threads.
+            Queue-based architecture: Different operations can be submitted to different queues, potentially executing in parallel.
+
+        However, multithreading in Vulkan requires careful consideration of:
+            Resource sharing: Ensuring safe access to shared resources across threads.
+            Synchronization: Properly synchronizing operations between threads.
+            Work distribution: Effectively distributing work to maximize parallelism.
+*/
+
+/*
     readFile function will read all the bytes from the specified file and return them in a byte array managed by std::vector. 
     We start by opening the file with two flags:
         ate: Start reading at the end of the file
