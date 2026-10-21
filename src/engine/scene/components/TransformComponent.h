@@ -1,9 +1,6 @@
 #pragma once
-
 #include "Component.h"
 #include <glm/glm.hpp> //linear algebra related types like vectors and matrices
-#include <glm/gtc/matrix_transform.hpp> // exposes functions that can be used to generate model transformations like glm::rotate, view transformations like glm::lookAt and projection transformations like glm::perspective.
-#include <glm/gtx/quaternion.hpp> // Required for glm::mat4_cast
 
 class TransformComponent : public Component {
     private:
@@ -35,19 +32,6 @@ class TransformComponent : public Component {
         const glm::vec3& GetPosition() const {return position; }
         const glm::quat& GetRotation() const {return rotation; }
         const glm::vec3& GetScale() const {return scale; }
-
-        glm::mat4 GetTransformMatrix() const {
-            if(transformDirty){
-                //calculate transformation matrix
-                glm::mat4 translationMatrix = glm::translate(glm::mat4(1.0), position);
-                glm::mat4 rotationMatrix = glm::mat4_cast(rotation);
-                glm::mat4 scaleMatrix = glm::scale(glm::mat4(1.0), scale);
-
-                transformMatrix = translationMatrix * rotationMatrix * scaleMatrix;
-                transformDirty = false;
-            }
-
-            return transformMatrix;
-        }
+        glm::mat4 GetTransformMatrix() const;
 
 };
