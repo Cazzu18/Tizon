@@ -1,8 +1,10 @@
 #pragma once
+#include "ComponentTypeIDSystem.h"
+#include <cstddef>
 
 class Entity; //forward declaration
 
-class Component {
+class Component{
     public:
         //managing lifecycle of components
         enum class State {
@@ -38,6 +40,11 @@ class Component {
         bool IsActive() const {return state == State::Active; }
         void SetOwner(Entity* entity) { owner = entity; }
         Entity* GetOwner() const { return owner; }
+
+        template<typename T>
+        static std::size_t GetTypeID() {
+            return ComponentTypeIDSystem::GetTypeID<T>();
+        }
 
     protected:
         virtual void OnInitialize() {}
