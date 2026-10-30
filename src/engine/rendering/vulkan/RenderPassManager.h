@@ -5,6 +5,7 @@
 #include <vector>
 #include <string>
 #include <vulkan/vulkan_raii.hpp>
+#include "CullingSystem.h"
 
 //forward declarations
 class RenderPass;
@@ -183,4 +184,251 @@ class RenderTarget{
             //or VkFramebuffer objects. Instead, we just create the images and
             //image views that will be used directly with vkCmdBeginRendering.
         }
+
+        //No need for explicit destructor with RAII objects
+
+        vk::ImageView GetColorImageView() const { return *colorImageView; }
+        vk::ImageView GetDepthImageView() const { return *depthImageView; }
+
+        uint32_t GetWidth() const { return width; }
+        uint32_t GetHeight() const { return height; }
+
+    private:
+        void CreateColorResources(){
+            // Implementation to create color image, memory, and view
+            // With dynamic rendering, we just need to create the image and image view
+            // that will be used with vkCmdBeginRendering
+            // ...
+        }
+
+        void CreateDepthResources(){
+            // Implementation to create depth image, memory, and view
+            // With dynamic rendering, we just need to create the image and image view
+            // that will be used with vkCmdBeginRendering
+            // ...
+        }
+
+        vk::raii::Device& GetDevice(){
+            //Get device from somewhere (e.g., singleton or paramter)
+
+            static vk::raii::Device device = nullptr; //placeholder
+            return device;
+        }
+};
+
+//Geometry pass for deferred rendering
+class GeometryPass : public RenderPass {
+    private:
+        CullingSystem* cullingSystem;
+
+        //G-buffer textures
+        RenderTarget* gBuffer;
+    public:
+        GeometryPass(const std::string& name, CullingSystem* culling) : RenderPass(name), cullingSystem(culling){
+            //Creating G-buffer render target
+            gBuffer = new RenderTarget(1920, 1080); //example
+            SetRenderTarget(gBuffer);
+        }
+
+        ~GeometryPass() override {
+            delete gBuffer;
+        }
+
+    protected:
+        void BeginPass(vk::raii::CommandBuffer& commandBuffer) override {
+            //Begine rendering with dynamic rendering
+            vk::RenderingInfoKHR renderingInfo;
+
+            //setting up color attachement
+            vk::RenderingAttachmentInfoKHR colorAttachment;
+            colorAttachment.setImageView(gBuffer->GetColorImageView())
+                            .setImageLayout(vk::ImageLayout::eColorAttachmentOptimal)
+                            .setLoadOp(vk::AttachmentLoadOp::eClear)
+                            .setStoreOp(vk::AttachmentStoreOp::eStore)
+                            .setClearValue(vk::ClearColorValue(std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f}));
+            //Setting up depth attachment
+            vk::RenderingAttachmentInfoKHR depthAttachment;
+            depthAttachment.setImageView(gBuffer->GetDepthImageView())
+                        .setImageLayout(vk::ImageLayout::eDepthStencilAttachmentOptimal)
+                        .setLoadOp(vk::AttachmentLoadOp::eClear)
+                        .setStoreOp(vk::AttachmentStoreOp::eStore)
+                        .setClearValue(vk::ClearDepthStencilValue(1.0f, 0));
+
+            //Configuring rendering info
+            renderingInfo.setRenderArea(vk::Rect2D({0, 0}, {gBuffer->GetWidth(), gBuffer->GetHeight()}))
+                        .setLayerCount(1)
+                        .setColorAttachmentCount(1)
+                        .setPColorAttachments(&colorAttachment)
+                        .setPDepthAttachment(&depthAttachment);
+
+            // Begin dynamic rendering
+            commandBuffer.beginRendering(renderingInfo);
+        }
+
+        void Render(vk::raii::CommandBuffer& commandBuffer) override {
+            //getting visible entities
+            const auto& visibleEntities = cullingSystem->GetVisibleEntities();
+
+            //Rendering each entity to G-buffer
+            for(auto entity : visibleEntities){
+                auto meshComponent = entity->GetComponent<MeshComponent>();
+                auto transformComponent = entity->GetComponent<TransformComponent>();
+
+                if(meshComponent && transformComponent){
+                    // Bind pipeline for G-buffer rendering
+                    // ...
+
+                    // Set model matrix
+                    // ...
+
+                    // Draw mesh
+                    // ...
+                }
+            }
+        }
+
+        void EndPass(vk::raii::CommandBuffer& commandBuffer) override {
+            //Ending dynamic rendering
+            commandBuffer.endRendering();
+        }
+};
+
+//LightingPass for deferred rendering
+class LightingPass : public RenderPass{
+    private:
+        GeometryPass* geometryPass;
+        std::vector<Light*> lights;
+    public:
+        LightingPass(const std::string& name, GeometryPass* gPass) : RenderPass(name), geometryPass(gPass) {
+            //Adding dependency on geometry pass
+            AddDependency(gPass->GetName());
+        }
+
+        void AddLight(Light* light){
+            lights.push_back(light);
+        }
+
+        void RemoveLight(Light* light){
+            auto it = std::find(lights.begin(), lights.end(), light);
+            if(it != lights.end()){
+                lights.erase(it);
+            }
+        }
+
+    protected:
+        void BeginPass(vk::raii::CommandBuffer& commandBuffer) override {
+            //Begin rendering with dynamic rendering
+            vk::RenderingInfoKHR renderingInfo;
+
+            //Setting up color attachment for the lighting pass
+            vk::RenderingAttachmentInfoKHR colorAttachment;
+            colorAttachment.setImageView(GetRenderTarget()->GetColorImageView())
+                        .setImageLayout(vk::ImageLayout::eColorAttachmentOptimal)
+                        .setLoadOp(vk::AttachmentLoadOp::eClear)
+                        .setStoreOp(vk::AttachmentStoreOp::eStore)
+                        .setClearValue(vk::ClearColorValue(std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f}));
+
+            //Configuring rendering info
+            renderingInfo.setRenderArea(vk::Rect2D({0, 0}, {GetRenderTarget()->GetWidth(), GetRenderTarget()->GetHeight()}))
+                        .setLayerCount(1)
+                        .setColorAttachmentCount(1)
+                        .setPColorAttachments(&colorAttachment);
+
+            //Begin dynamic rendering
+            commandBuffer.beginRendering(renderingInfo);
+        }
+
+        void Render(vk::raii::CommandBuffer& commandBuffer) override {
+            //Binding G-buffer textures from the geometry pass
+            auto gBuffer = geometryPass->GetRenderTarget();
+
+            //Set up descriptor sets for G-buffer textures
+            //With dynamic rendering, we access the G-buffer textures directly as shader resources
+            //rather than as subpass inputs
+
+            //Render full-screen quad with lighting shader
+            // ...
+
+            //For each light
+            for (auto light : lights) {
+                //Set light properties
+                // ...
+
+                //Draw light volume
+                // ...
+            }
+        }
+
+        void EndPass(vk::raii::CommandBuffer& commandBuffer) override {
+            //End dynamic rendering
+            commandBuffer.endRendering();
+        }
+};
+
+//Post-process effect base class
+class PostProcessEffect{
+    public:
+        virtual ~PostProcessEffect() = default;
+        virtual void Apply(vk::raii::CommandBuffer& commandBuffer) = 0;
+};
+
+//Post-processing pass
+class PostProcessPass : public RenderPass {
+    private:
+        LightingPass* lightingPass;
+        std::vector<PostProcessEffect*> effects;
+
+    public:
+        PostProcessPass(const std::string& name, LightingPass* lPass) : RenderPass(name), lightingPass(lPass) {
+            //adding dependency on lighting pass
+            AddDependency(lPass->GetName());
+        }
+
+        void AddEffect(PostProcessEffect* effect){
+            effects.push_back(effect);
+        }
+
+        void RemoveEffect(PostProcessEffect* effect){
+            auto it = std::find(effects.begin(), effects.end(), effect);
+            if(it != effects.end()){
+                effects.erase(it);
+            }
+        }
+    protected:
+        void BeginPass(vk::raii::CommandBuffer& commandBuffer) override {
+            //Begin rendering with dynamic rendering
+            vk::RenderingInfoKHR renderingInfo;
+
+            //Setting up color attachment for the post-processing pass
+            vk::RenderingAttachmentInfoKHR colorAttachment;
+            colorAttachment.setImageView(GetRenderTarget()->GetColorImageView())
+                        .setImageLayout(vk::ImageLayout::eColorAttachmentOptimal)
+                        .setLoadOp(vk::AttachmentLoadOp::eClear)
+                        .setStoreOp(vk::AttachmentStoreOp::eStore)
+                        .setClearValue(vk::ClearColorValue(std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f}));
+
+            //Configuring rendering info
+            renderingInfo.setRenderArea(vk::Rect2D({0, 0}, {GetRenderTarget()->GetWidth(), GetRenderTarget()->GetHeight()}))
+                        .setLayerCount(1)
+                        .setColorAttachmentCount(1)
+                        .setPColorAttachments(&colorAttachment);
+
+            //Begin dynamic rendering
+            commandBuffer.beginRendering(renderingInfo);
+        }
+
+        void Render(vk::raii::CommandBuffer& commandBuffer) override {
+            //With dynamic rendering, each effect can set up its own rendering state and access input textures directly as shader resources
+
+            //Apply each post-process effect
+            for (auto effect : effects) {
+                effect->Apply(commandBuffer);
+            }
+        }
+
+        void EndPass(vk::raii::CommandBuffer& commandBuffer) override {
+            //End dynamic rendering
+            commandBuffer.endRendering();
+        }
+        
 };
