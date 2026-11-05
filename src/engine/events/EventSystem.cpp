@@ -16,6 +16,6 @@ void EventSystem::RemoveListener(EventListener* listener){
 
 void EventSystem::DispatchEvent(const Event& event){
     for(auto listener : listeners){
-        listener->onEvent(event);
+        listener->OnEvent(event);
     }
 }
