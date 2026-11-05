@@ -1,6 +1,8 @@
 #pragma once
 #include <iostream>
 #include "Event.h"
+#include "Entity.h"
+#include "UIElement.h"
 
 class WindowResizeEvent : public Event {
     private:
@@ -13,7 +15,7 @@ class WindowResizeEvent : public Event {
         int GetWidth() const { return width; }
         int GetHeight() const { return height; }
 
-        DEFINE_EVENT_TYPE(WindowResizeEvent, static_cast<int>(EventCategory::Window));
+        DEFINE_EVENT_TYPE_CATEGORY(WindowResizeEvent, static_cast<int>(EventCategory::Window));
 };
 
 //example with categories
@@ -28,10 +30,27 @@ class KeyPressEvent : public Event {
         int GetKeyCode() const { return keyCode; }
         bool IsRepeat() const { return repeat; }
 
-        DEFINE_EVENT_TYPE(KeyPressEvent,
+        DEFINE_EVENT_TYPE_CATEGORY(KeyPressEvent,
                             static_cast<int>(EventCategory::Input) |
                             static_cast<int>(EventCategory::Keyboard))
-    };
+};
+
+//example with categories
+class KeyReleaseEvent : public Event {
+    private:
+        int keyCode;
+        bool repeat;
+
+    public:
+        KeyReleaseEvent(int key, bool isRepeat) : keyCode(key), repeat(isRepeat) {}
+
+        int GetKeyCode() const { return keyCode; }
+        bool IsRepeat() const { return repeat; }
+
+        DEFINE_EVENT_TYPE_CATEGORY(KeyReleaseEvent,
+                            static_cast<int>(EventCategory::Input) |
+                            static_cast<int>(EventCategory::Keyboard))
+};
 
 
 /*
@@ -56,7 +75,7 @@ class UIEvent : public Event {
 
         UIElement* GetTarget() const { return target; }
 
-        bool Bubbles() const { returns bubbles; }
+        bool Bubbles() const { return bubbles; }
 
         void StopPropagation(){
             cancelBubble = true;
@@ -69,30 +88,15 @@ class UIEvent : public Event {
         DEFINE_EVENT_TYPE_CATEGORY(UIEvent, static_cast<int>(EventCategory::UI))
 };
 
-//UI system with event bubbling
-class UISystem {
+class CollisionEvent : public Event {
+    private:
+        Entity* entity1;
+        Entity* entity2;
     public:
-        void DispatchEvent(UIEvent& event){
-            UIElement* target = event.GetTarget();
+        CollisionEvent(Entity* e1, Entity* e2) : entity1(e1), entity2(e2) {}
 
-            //capturing phase (top-down)
-            std::vector<UIElement*> path;
-            UIElement* current = target;
+        Entity* GetEntity1() const { return entity1; }
+        Entity* GetEntity2() const { return entity2; }
 
-            while(current){
-                path.push_back(current);
-                current = current->GetParent();
-            }
-
-            //dispatch to each element in the path(bottom-up)
-            //rbegin() returns a reverse iterator pointing to the last element of the vector. We can use it to traverse a vector backwards toward the beginning
-            //in this case, we have the target at the beginnning of th array and the root at the end, so we start with the root
-            for(auto it = path.rbegin(); it != path.rend(); ++it){
-                (*it)->OnEvent(event);
-
-                if(event.IsPropagationStopped()){
-                    break;
-                }
-            }
-        }
+        DEFINE_EVENT_TYPE_CATEGORY(CollisionEvent, static_cast<int>(EventCategory::Physics))
 };

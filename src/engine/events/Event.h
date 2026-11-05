@@ -28,7 +28,8 @@ enum class EventCategory {
     Mouse = 1 << 3, // ...
     MouseButton = 1 << 4,
     Window = 1 << 5,
-    UI = 1 << 6
+    UI = 1 << 6,
+    Physics = 1 << 7
 };
 
 class Event{

@@ -1,7 +1,8 @@
-#include <iostream>
 #include "EventBus.h"
+#include <iostream>
+#include <algorithm>
 
-void EventBus::AddListener(EventListener* listener, int categoryFilter = -1, int priority = 0){
+void EventBus::AddListener(EventListener* listener, int categoryFilter, int priority){
     listeners.push_back({listener, categoryFilter, priority});
 
     //sorting listeners by priority (higher priority first)

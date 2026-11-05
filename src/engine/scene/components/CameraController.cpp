@@ -1,12 +1,13 @@
-#include <iostream>
-#include <glm/glm.hpp>
 #include "Component.h"
-#include "CameraComponent.h"
 #include "EventListener.h"
+#include "CameraComponent.h"
 #include "EventDispatcher.h"
 #include "EventBus.h"
 #include "TransformComponent.h"
 #include "Events.h"
+
+#include <iostream>
+#include <glm/glm.hpp>
 
 
 //Component that listens for events
@@ -40,7 +41,7 @@ class CameraController : public Component, public EventListener {
             if(moveLeft) movement.x -= 1.0f;
             if(moveRight) movement.x += 1.0f;
 
-            //if magnitude(sqrt(x^2 + y^2 + z^2)) of the 3 dimensional vec > 0.0f
+            //if magnitude(sqrt(x^2 + y^2 + z^2)) of the 3 dimensional vec > 0.0f which indicates movement
             if(glm::length(movement) > 0.0f){
                 movement = glm::normalize(movement) * moveSpeed * deltaTime;
                 
@@ -97,7 +98,7 @@ class CameraController : public Component, public EventListener {
 
     private:
         EventBus& GetEventBus(){
-            //Get event bus from somewhere (singleton or parameter)
+            //TODO: Get event bus from somewhere (singleton or parameter)
             static EventBus eventBus;
             return eventBus;
         }
